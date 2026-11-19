@@ -124,7 +124,7 @@
       return formatDateKey(sunday);
     };
 
-    const getMonthKey = (dateKey) => dateKey.slice(0, 7); // YYYY-MM
+    const getMonthKey = (dateKey) => dateKey.slice(0, 7);
 
     const getEmptyDayLog = () => ({
       workoutTags: [],
@@ -137,8 +137,82 @@
       painLevels: {},
       conditionMemo: '',
       expenses: [],
-      dailyNote: ''
+      dailyNote: '',
+      diaryTitle: '',
+      diaryBody: '',
+      photos: [], // [{ id, dataUrl, caption }]
+      videos: []  // [{ id, title, url, embedUrl, platform }]
     });
+
+    // ==========================================
+    // 사진 자동 압축 유틸리티 (Max 1080px, JPEG 0.72)
+    // ==========================================
+    const compressImageFile = (file, maxWidth = 1080, quality = 0.72) => {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const img = new Image();
+          img.onload = () => {
+            let width = img.width;
+            let height = img.height;
+            if (width > maxWidth) {
+              height = Math.round((height * maxWidth) / width);
+              width = maxWidth;
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, width, height);
+            resolve(canvas.toDataURL('image/jpeg', quality));
+          };
+          img.onerror = reject;
+          img.src = e.target.result;
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    };
+
+    // ==========================================
+    // 유튜브 / 구글 드라이브 영상 임베드 변환
+    // ==========================================
+    const parseVideoEmbedUrl = (rawUrl) => {
+      const url = (rawUrl || '').trim();
+      if (!url) return null;
+
+      // YouTube watch / youtu.be / shorts
+      const ytMatch = url.match(
+        /(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{6,})/
+      );
+      if (ytMatch && ytMatch[1]) {
+        return {
+          platform: 'YouTube',
+          embedUrl: `https://www.youtube.com/embed/${ytMatch[1]}`,
+          originalUrl: url
+        };
+      }
+
+      // Google Drive /file/d/{id}/view or ?id={id}
+      const driveFileMatch = url.match(/drive\.google\.com\/file\/d\/([A-Za-z0-9_-]+)/);
+      if (driveFileMatch && driveFileMatch[1]) {
+        return {
+          platform: 'Google Drive',
+          embedUrl: `https://drive.google.com/file/d/${driveFileMatch[1]}/preview`,
+          originalUrl: url
+        };
+      }
+      const driveQueryMatch = url.match(/drive\.google\.com\/.*[?&]id=([A-Za-z0-9_-]+)/);
+      if (driveQueryMatch && driveQueryMatch[1]) {
+        return {
+          platform: 'Google Drive',
+          embedUrl: `https://drive.google.com/file/d/${driveQueryMatch[1]}/preview`,
+          originalUrl: url
+        };
+      }
+
+      return null;
+    };
 
     function App() {
       const [syncStatus, setSyncStatus] = useState(db ? 'connecting' : 'local');
@@ -161,7 +235,6 @@
         }
       });
 
-      // 일 / 주 / 월 목표 상태: { daily: { 'YYYY-MM-DD': [...] }, weekly: { 'YYYY-MM-DD(일요일)': [...] }, monthly: { 'YYYY-MM': [...] } }
       const [goals, setGoals] = useState(() => {
         try {
           const saved = localStorage.getItem(STORAGE_GOALS_KEY);
@@ -239,16 +312,17 @@
         }
       };
 
-      const updateDayLog = (updater) => {
+      const updateDayLog = (updater, targetDateKey = null) => {
+        const keyToUse = targetDateKey || selectedDateKey;
         setLogs((prev) => {
-          const existing = { ...getEmptyDayLog(), ...(prev[selectedDateKey] || {}) };
+          const existing = { ...getEmptyDayLog(), ...(prev[keyToUse] || {}) };
           const updated = typeof updater === 'function' ? updater(existing) : { ...existing, ...updater };
-          const nextLogs = { ...prev, [selectedDateKey]: updated };
+          const nextLogs = { ...prev, [keyToUse]: updated };
           localStorage.setItem(STORAGE_LOGS_KEY, JSON.stringify(nextLogs));
 
           if (db) {
             setSyncStatus('saving');
-            db.ref(`${DB_ROOT_PATH}/logs/${selectedDateKey}`)
+            db.ref(`${DB_ROOT_PATH}/logs/${keyToUse}`)
               .set(updated)
               .then(() => setSyncStatus('synced'))
               .catch(() => setSyncStatus('error'));
@@ -265,13 +339,21 @@
       const [isEditConfigMode, setIsEditConfigMode] = useState(false);
       const [isEditingTitle, setIsEditingTitle] = useState(false);
 
+      // 더블클릭/상세 일기 모달 상태
+      const [diaryModalDateKey, setDiaryModalDateKey] = useState(null);
+      const [lightboxPhoto, setLightboxPhoto] = useState(null);
+      const [videoTitleInput, setVideoTitleInput] = useState('');
+      const [videoUrlInput, setVideoUrlInput] = useState('');
+      const [videoErrorMsg, setVideoErrorMsg] = useState('');
+      const [isCompressingPhoto, setIsCompressingPhoto] = useState(false);
+
       // 검색 모달 상태
       const [isSearchOpen, setIsSearchOpen] = useState(false);
       const [searchQuery, setSearchQuery] = useState('');
-      const [searchFilter, setSearchFilter] = useState('all'); // 'all' | 'workout' | 'expense' | 'condition' | 'habit'
+      const [searchFilter, setSearchFilter] = useState('all');
 
-      // 캘린더와 별개 목표 보드 상태
-      const [goalPeriod, setGoalPeriod] = useState('daily'); // 'daily' | 'weekly' | 'monthly'
+      // 일 / 주 / 월 목표 보드 상태
+      const [goalPeriod, setGoalPeriod] = useState('daily');
       const [goalInput, setGoalInput] = useState('');
       const [editingGoalId, setEditingGoalId] = useState(null);
       const [editingGoalText, setEditingGoalText] = useState('');
@@ -298,6 +380,97 @@
       const currentDayLog = useMemo(() => {
         return { ...getEmptyDayLog(), ...(logs[selectedDateKey] || {}) };
       }, [logs, selectedDateKey]);
+
+      const activeDiaryLog = useMemo(() => {
+        if (!diaryModalDateKey) return getEmptyDayLog();
+        return { ...getEmptyDayLog(), ...(logs[diaryModalDateKey] || {}) };
+      }, [logs, diaryModalDateKey]);
+
+      const openDiaryForDate = (dateKey) => {
+        setSelectedDateKey(dateKey);
+        setDiaryModalDateKey(dateKey);
+        setVideoErrorMsg('');
+      };
+
+      // 사진 파일 선택 및 압축 핸들러
+      const handlePhotoUpload = async (e) => {
+        const files = Array.from(e.target.files || []);
+        if (!files.length || !diaryModalDateKey) return;
+        setIsCompressingPhoto(true);
+        try {
+          const compressedItems = [];
+          for (const file of files) {
+            const dataUrl = await compressImageFile(file, 1080, 0.72);
+            compressedItems.push({
+              id: 'ph_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+              dataUrl,
+              caption: file.name.replace(/\.[^/.]+$/, '')
+            });
+          }
+          updateDayLog(
+            (prev) => ({
+              ...prev,
+              photos: [...(prev.photos || []), ...compressedItems]
+            }),
+            diaryModalDateKey
+          );
+        } catch (err) {
+          alert('사진 처리 중 오류가 발생했습니다.');
+        } finally {
+          setIsCompressingPhoto(false);
+          e.target.value = '';
+        }
+      };
+
+      const handleDeletePhoto = (photoId) => {
+        if (!diaryModalDateKey) return;
+        updateDayLog(
+          (prev) => ({
+            ...prev,
+            photos: (prev.photos || []).filter((p) => p.id !== photoId)
+          }),
+          diaryModalDateKey
+        );
+      };
+
+      // 동영상 링크 등록 핸들러 (YouTube / Google Drive)
+      const handleAddVideoLink = (e) => {
+        e.preventDefault();
+        if (!diaryModalDateKey) return;
+        const parsed = parseVideoEmbedUrl(videoUrlInput);
+        if (!parsed) {
+          setVideoErrorMsg('YouTube 링크(watch/shorts/youtu.be) 또는 Google Drive 파일 공유 링크만 지원됩니다.');
+          return;
+        }
+        const newVid = {
+          id: 'vid_' + Date.now(),
+          title: videoTitleInput.trim() || `${parsed.platform} 영상`,
+          url: parsed.originalUrl,
+          embedUrl: parsed.embedUrl,
+          platform: parsed.platform
+        };
+        updateDayLog(
+          (prev) => ({
+            ...prev,
+            videos: [...(prev.videos || []), newVid]
+          }),
+          diaryModalDateKey
+        );
+        setVideoTitleInput('');
+        setVideoUrlInput('');
+        setVideoErrorMsg('');
+      };
+
+      const handleDeleteVideo = (videoId) => {
+        if (!diaryModalDateKey) return;
+        updateDayLog(
+          (prev) => ({
+            ...prev,
+            videos: (prev.videos || []).filter((v) => v.id !== videoId)
+          }),
+          diaryModalDateKey
+        );
+      };
 
       // ==========================================
       // 일 / 주 / 월 목표 제어 함수
@@ -342,19 +515,12 @@
       const handleAddGoal = (e) => {
         e.preventDefault();
         if (!goalInput.trim()) return;
-        const newItem = {
-          id: 'g_' + Date.now(),
-          text: goalInput.trim(),
-          done: false
-        };
-        saveGoalsBucket([...currentGoalList, newItem]);
+        saveGoalsBucket([...currentGoalList, { id: 'g_' + Date.now(), text: goalInput.trim(), done: false }]);
         setGoalInput('');
       };
 
       const handleToggleGoal = (id) => {
-        saveGoalsBucket(
-          currentGoalList.map((g) => (g.id === id ? { ...g, done: !g.done } : g))
-        );
+        saveGoalsBucket(currentGoalList.map((g) => (g.id === id ? { ...g, done: !g.done } : g)));
       };
 
       const handleDeleteGoal = (id) => {
@@ -377,14 +543,13 @@
         const q = searchQuery.trim().toLowerCase();
         if (!q && searchFilter === 'all') return [];
 
-        const sortedDates = Object.keys(logs).sort((a, b) => b.localeCompare(a)); // 최신순
+        const sortedDates = Object.keys(logs).sort((a, b) => b.localeCompare(a));
         const results = [];
 
         sortedDates.forEach((dateKey) => {
           const l = { ...getEmptyDayLog(), ...(logs[dateKey] || {}) };
           const matches = [];
 
-          // 1. 운동 검색
           if (searchFilter === 'all' || searchFilter === 'workout') {
             const matchedTags = (l.workoutTags || []).filter((t) => t.toLowerCase().includes(q));
             if (matchedTags.length > 0 && q) {
@@ -408,7 +573,6 @@
             }
           }
 
-          // 2. 소비 검색
           if (searchFilter === 'all' || searchFilter === 'expense') {
             (l.expenses || []).forEach((ex) => {
               const textHit =
@@ -425,7 +589,6 @@
             });
           }
 
-          // 3. 컨디션/아팠던 날/통증 검색
           if (searchFilter === 'all' || searchFilter === 'condition') {
             const sickHit = q && ('아팠'.includes(q) || '병가'.includes(q) || '몸살'.includes(q)) && l.isSick;
             if (sickHit || (searchFilter === 'condition' && !q && l.isSick)) {
@@ -442,7 +605,6 @@
             });
           }
 
-          // 4. 습관 및 메모 검색
           if (searchFilter === 'all' || searchFilter === 'habit') {
             const matchedHabits = config.habits.filter(
               (h) => l.habitsDone?.includes(h.id) && (!q || h.label.toLowerCase().includes(q))
@@ -452,9 +614,16 @@
             }
           }
 
-          // 5. 자유 메모 검색
-          if (searchFilter === 'all' && q && l.dailyNote && l.dailyNote.toLowerCase().includes(q)) {
-            matches.push({ type: 'note', label: `메모: "${l.dailyNote}"` });
+          if (searchFilter === 'all' && q) {
+            if (l.dailyNote && l.dailyNote.toLowerCase().includes(q)) {
+              matches.push({ type: 'note', label: `메모: "${l.dailyNote}"` });
+            }
+            if (
+              (l.diaryTitle && l.diaryTitle.toLowerCase().includes(q)) ||
+              (l.diaryBody && l.diaryBody.toLowerCase().includes(q))
+            ) {
+              matches.push({ type: 'diary', label: `일기: ${l.diaryTitle || l.diaryBody.slice(0, 40)}` });
+            }
           }
 
           if (matches.length > 0) {
@@ -468,7 +637,9 @@
       const jumpToSearchDate = (dateKey, matchType) => {
         setSelectedDateKey(dateKey);
         setCurrentDate(new Date(dateKey + 'T00:00:00'));
-        if (['workout', 'habit', 'condition', 'expense'].includes(matchType)) {
+        if (matchType === 'diary') {
+          setDiaryModalDateKey(dateKey);
+        } else if (['workout', 'habit', 'condition', 'expense'].includes(matchType)) {
           setActiveTab(matchType);
         }
         setIsSearchOpen(false);
@@ -693,7 +864,6 @@
               </div>
 
               <div className="flex items-center gap-2 flex-wrap">
-                {/* 기록 검색 버튼 */}
                 <button
                   onClick={() => setIsSearchOpen(true)}
                   className="px-3 py-1.5 text-xs sm:text-sm font-bold rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/50 text-indigo-300 transition"
@@ -749,6 +919,204 @@
             </div>
           </header>
 
+          {/* ========================================== */}
+          {/* 날짜 더블클릭(및 모바일 열기) 전체 일기장 모달 */}
+          {/* ========================================== */}
+          {diaryModalDateKey && (
+            <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-2 sm:p-4">
+              <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-3xl max-h-[92vh] flex flex-col overflow-hidden shadow-2xl">
+                {/* 일기장 상단 바 */}
+                <div className="px-4 py-3.5 bg-slate-950 border-b border-slate-800 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2.5">
+                    <span className="text-xl">📖</span>
+                    <div>
+                      <div className="text-[11px] text-indigo-400 font-bold">상세 일기 & 미디어 기록</div>
+                      <h2 className="text-base sm:text-lg font-extrabold">{diaryModalDateKey} 일기</h2>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setDiaryModalDateKey(null)}
+                    className="px-3 py-1.5 text-xs font-bold bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-200"
+                  >
+                    닫기 ✕
+                  </button>
+                </div>
+
+                {/* 일기장 본문 스크롤 영역 */}
+                <div className="p-4 sm:p-5 overflow-y-auto space-y-5 flex-1">
+                  {/* 일기 제목 & 본문 */}
+                  <div className="space-y-2.5">
+                    <input
+                      type="text"
+                      value={activeDiaryLog.diaryTitle || ''}
+                      onChange={(e) => updateDayLog({ diaryTitle: e.target.value }, diaryModalDateKey)}
+                      placeholder="오늘 일기 제목 (예: 사당/연남 볼더링 & 턱 플란체 체크)"
+                      className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-xl px-3.5 py-2.5 text-sm sm:text-base font-bold outline-none"
+                    />
+                    <textarea
+                      rows="7"
+                      value={activeDiaryLog.diaryBody || ''}
+                      onChange={(e) => updateDayLog({ diaryBody: e.target.value }, diaryModalDateKey)}
+                      placeholder="오늘 하루 있었던 일, 감상, 연습 기록, 컨디션 등을 자유롭게 길게 적어보세요..."
+                      className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-xl p-3.5 text-sm leading-relaxed text-slate-100 outline-none resize-y"
+                    />
+                  </div>
+
+                  {/* 사진 첨부 영역 (자동 압축 저장) */}
+                  <div className="pt-4 border-t border-slate-800 space-y-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <div className="text-sm font-extrabold text-slate-100">📷 사진 첨부</div>
+                        <div className="text-[11px] text-slate-400">
+                          선택 시 자동으로 용량 압축 후 저장됩니다 {isCompressingPhoto ? '(압축 중...)' : ''}
+                        </div>
+                      </div>
+                      <label className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg cursor-pointer transition">
+                        + 사진 추가
+                        <input
+                          type="file"
+                          accept="image/*"
+                          multiple
+                          onChange={handlePhotoUpload}
+                          className="hidden"
+                        />
+                      </label>
+                    </div>
+
+                    {(activeDiaryLog.photos || []).length === 0 ? (
+                      <div className="text-center py-6 text-xs text-slate-500 bg-slate-950/60 border border-dashed border-slate-800 rounded-xl">
+                        첨부된 사진이 없습니다.
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                        {(activeDiaryLog.photos || []).map((ph) => (
+                          <div
+                            key={ph.id}
+                            className="group relative bg-slate-950 border border-slate-800 rounded-xl overflow-hidden"
+                          >
+                            <img
+                              src={ph.dataUrl}
+                              alt={ph.caption || '첨부 사진'}
+                              onClick={() => setLightboxPhoto(ph)}
+                              className="w-full h-36 object-cover cursor-pointer hover:opacity-90 transition"
+                            />
+                            <button
+                              onClick={() => handleDeletePhoto(ph.id)}
+                              title="사진 삭제"
+                              className="absolute top-1.5 right-1.5 w-6 h-6 rounded-full bg-black/70 hover:bg-rose-600 text-white text-xs font-bold flex items-center justify-center"
+                            >
+                              ✕
+                            </button>
+                            {ph.caption && (
+                              <div className="px-2 py-1 text-[11px] text-slate-400 truncate bg-slate-950/90">
+                                {ph.caption}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 동영상 임베드 영역 (YouTube / Google Drive 링크) */}
+                  <div className="pt-4 border-t border-slate-800 space-y-3">
+                    <div>
+                      <div className="text-sm font-extrabold text-slate-100">🎬 동영상 연결 (YouTube / Google Drive)</div>
+                      <div className="text-[11px] text-slate-400">
+                        파일 직접 업로드 대신 YouTube 또는 Google Drive 공유 링크를 넣으면 일기장 안에서 바로 재생됩니다.
+                      </div>
+                    </div>
+
+                    <form onSubmit={handleAddVideoLink} className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <input
+                          type="text"
+                          value={videoTitleInput}
+                          onChange={(e) => setVideoTitleInput(e.target.value)}
+                          placeholder="영상 제목 (예: 연남 보라 완등 영상)"
+                          className="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs outline-none focus:border-indigo-500"
+                        />
+                        <input
+                          type="text"
+                          value={videoUrlInput}
+                          onChange={(e) => setVideoUrlInput(e.target.value)}
+                          placeholder="YouTube 또는 Google Drive 공유 URL"
+                          className="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs outline-none focus:border-indigo-500"
+                        />
+                      </div>
+                      {videoErrorMsg && (
+                        <div className="text-[11px] text-rose-400 font-semibold">{videoErrorMsg}</div>
+                      )}
+                      <button
+                        type="submit"
+                        className="w-full py-2 bg-slate-800 hover:bg-slate-700 text-xs font-bold rounded-lg text-indigo-300 transition"
+                      >
+                        + 영상 플레이어 추가
+                      </button>
+                    </form>
+
+                    {(activeDiaryLog.videos || []).length > 0 && (
+                      <div className="space-y-3">
+                        {(activeDiaryLog.videos || []).map((vid) => (
+                          <div
+                            key={vid.id}
+                            className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className="text-[10px] bg-indigo-500/20 text-indigo-300 px-2 py-0.5 rounded font-bold shrink-0">
+                                  {vid.platform}
+                                </span>
+                                <span className="text-xs sm:text-sm font-bold truncate">{vid.title}</span>
+                              </div>
+                              <button
+                                onClick={() => handleDeleteVideo(vid.id)}
+                                className="text-xs text-rose-400 hover:text-rose-300 font-semibold shrink-0"
+                              >
+                                삭제
+                              </button>
+                            </div>
+                            <div className="aspect-video w-full rounded-lg overflow-hidden bg-black border border-slate-800">
+                              <iframe
+                                src={vid.embedUrl}
+                                title={vid.title}
+                                className="w-full h-full"
+                                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                                allowFullScreen
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 사진 확대 라이트박스 */}
+          {lightboxPhoto && (
+            <div
+              onClick={() => setLightboxPhoto(null)}
+              className="fixed inset-0 z-[60] bg-black/90 flex items-center justify-center p-4"
+            >
+              <div className="max-w-4xl max-h-[90vh] flex flex-col items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                <img
+                  src={lightboxPhoto.dataUrl}
+                  alt={lightboxPhoto.caption || '확대 사진'}
+                  className="max-h-[82vh] max-w-full object-contain rounded-xl"
+                />
+                <button
+                  onClick={() => setLightboxPhoto(null)}
+                  className="px-4 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs font-bold rounded-lg text-white"
+                >
+                  닫기
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* 전체 기록 검색 모달 */}
           {isSearchOpen && (
             <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
@@ -771,7 +1139,7 @@
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="예: 연남, 쌀, 아팠던, 보라 완등, 주유, 복압..."
+                    placeholder="예: 연남, 쌀, 아팠던, 보라 완등, 주유, 일기..."
                     autoFocus
                     className="w-full bg-slate-900 border border-slate-700 focus:border-indigo-500 rounded-xl px-3.5 py-2.5 text-sm outline-none"
                   />
@@ -815,7 +1183,7 @@
                       >
                         <div className="flex items-center justify-between mb-1.5">
                           <span className="text-sm font-extrabold text-indigo-400">{res.dateKey}</span>
-                          <span className="text-[11px] text-slate-400">클릭해서 해당 날짜 열기 →</span>
+                          <span className="text-[11px] text-slate-400">클릭해서 해당 기록 열기 →</span>
                         </div>
                         <div className="space-y-1">
                           {res.matches.map((m, idx) => (
@@ -836,7 +1204,6 @@
           <main className="max-w-7xl mx-auto px-3 sm:px-4 pt-4 grid grid-cols-1 lg:grid-cols-12 gap-5">
             {/* 좌측 7컬럼: 캘린더 + (별개 영역) 일/주/월 목표 보드 */}
             <section className="lg:col-span-7 flex flex-col gap-5">
-              {/* 캘린더 요약 & 네비게이션 */}
               <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
@@ -891,9 +1258,12 @@
                 </div>
               </div>
 
-              {/* 월간 뷰 */}
+              {/* 월간 뷰 (날짜 더블클릭 시 일기 펼침) */}
               {viewMode === 'month' && (
                 <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-3 sm:p-4">
+                  <div className="flex items-center justify-between mb-2 px-1">
+                    <span className="text-[11px] text-slate-400">날짜 클릭: 기록 선택 · 더블클릭: 일기 펼치기</span>
+                  </div>
                   <div className="grid grid-cols-7 mb-2 text-center text-xs font-semibold text-slate-400">
                     {korWeekNames.map((w, idx) => (
                       <div key={w} className={idx === 0 ? 'text-rose-400' : idx === 6 ? 'text-sky-400' : ''}>
@@ -919,11 +1289,16 @@
                         ? Math.max(0, ...Object.values(dLog.painLevels).map(Number))
                         : 0;
                       const dayExpense = (dLog?.expenses || []).reduce((acc, cur) => acc + (Number(cur.amount) || 0), 0);
+                      const hasDiaryMedia =
+                        (dLog?.diaryBody && dLog.diaryBody.trim().length > 0) ||
+                        (dLog?.photos && dLog.photos.length > 0) ||
+                        (dLog?.videos && dLog.videos.length > 0);
 
                       return (
                         <button
                           key={item.key}
                           onClick={() => setSelectedDateKey(item.key)}
+                          onDoubleClick={() => openDiaryForDate(item.key)}
                           className={`min-h-[78px] sm:min-h-[92px] p-1.5 rounded-xl border text-left flex flex-col justify-between transition relative ${
                             isSelected
                               ? 'bg-indigo-950/60 border-indigo-500 ring-1 ring-indigo-500'
@@ -947,6 +1322,7 @@
                               {item.date.getDate()}
                             </span>
                             <div className="flex items-center gap-0.5 text-[11px]">
+                              {hasDiaryMedia && <span title="일기/사진/영상 있음">📖</span>}
                               {isSick && <span title="아팠던 날">🤒</span>}
                               {maxPain >= 3 && <span title={`통증 Lv.${maxPain}`}>🩹</span>}
                             </div>
@@ -989,6 +1365,7 @@
                       <div
                         key={item.key}
                         onClick={() => setSelectedDateKey(item.key)}
+                        onDoubleClick={() => openDiaryForDate(item.key)}
                         className={`p-3.5 rounded-2xl border transition cursor-pointer ${
                           isSelected
                             ? 'bg-indigo-950/40 border-indigo-500 ring-1 ring-indigo-500'
@@ -1010,11 +1387,22 @@
                               </span>
                             )}
                           </div>
-                          {dayExpense > 0 && (
-                            <span className="text-xs font-bold text-amber-400 bg-amber-500/10 px-2.5 py-1 rounded-lg">
-                              지출 {dayExpense.toLocaleString()}원
-                            </span>
-                          )}
+                          <div className="flex items-center gap-2">
+                            {dayExpense > 0 && (
+                              <span className="text-xs font-bold text-amber-400 bg-amber-500/10 px-2.5 py-1 rounded-lg">
+                                지출 {dayExpense.toLocaleString()}원
+                              </span>
+                            )}
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openDiaryForDate(item.key);
+                              }}
+                              className="text-[11px] bg-slate-800 hover:bg-indigo-600 text-slate-200 px-2 py-1 rounded-lg font-semibold"
+                            >
+                              📖 일기
+                            </button>
+                          </div>
                         </div>
 
                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
@@ -1091,9 +1479,7 @@
                 </div>
               )}
 
-              {/* ========================================== */}
               {/* 캘린더와 별개의 [일 목표 / 주 목표 / 월 목표] 보드 */}
-              {/* ========================================== */}
               <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
@@ -1221,16 +1607,24 @@
             {/* 우측 5컬럼: 선택한 날짜의 캘린더 상세 기록장 */}
             <section className="lg:col-span-5">
               <div className="bg-slate-900/95 border border-slate-800 rounded-2xl p-4 sticky top-16">
-                <div className="flex items-center justify-between pb-3 mb-3 border-b border-slate-800">
+                <div className="flex items-center justify-between gap-2 pb-3 mb-3 border-b border-slate-800">
                   <div>
                     <span className="text-xs text-indigo-400 font-bold">선택된 날짜</span>
                     <h3 className="text-lg font-extrabold">{selectedDateKey} 기록장</h3>
                   </div>
-                  {isEditConfigMode && (
-                    <span className="text-xs bg-amber-500/20 text-amber-300 border border-amber-500/40 px-2.5 py-1 rounded-full font-semibold">
-                      자유 편집 모드 켜짐
-                    </span>
-                  )}
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={() => openDiaryForDate(selectedDateKey)}
+                      className="px-2.5 py-1.5 text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition"
+                    >
+                      📖 일기 펼치기
+                    </button>
+                    {isEditConfigMode && (
+                      <span className="text-[11px] bg-amber-500/20 text-amber-300 border border-amber-500/40 px-2 py-1 rounded-full font-semibold">
+                        자유 편집
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-4 gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800 mb-4">
