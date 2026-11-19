@@ -11,7 +11,7 @@
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <!-- Babel -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <!-- Firebase Compat SDK (단일 HTML용) -->
+  <!-- Firebase Compat SDK -->
   <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
   <style>
@@ -33,15 +33,14 @@
   <div id="root"></div>
 
   <script type="text/babel">
-    const { useState, useEffect, useMemo, useRef } = React;
+    const { useState, useEffect, useMemo } = React;
 
     // ==========================================
-    // 0. Firebase 설정 (여기에 본인의 Realtime Database URL 입력)
+    // 0. Firebase 설정
     // ==========================================
     const FIREBASE_CONFIG = {
       databaseURL: "https://calander-b4df0-default-rtdb.asia-southeast1.firebasedatabase.app"
     };
-      // 예시: "https://meraki-vocal-default-rtdb.asia-southeast1.firebasedatabase.app"
 
     let db = null;
     const isFirebaseConfigured =
@@ -60,7 +59,7 @@
     }
 
     // ==========================================
-    // 1. 기본 프리셋 설정 (웹 앱 안에서 100% 추가/수정/삭제 가능)
+    // 1. 기본 프리셋 설정
     // ==========================================
     const DEFAULT_CONFIG = {
       appTitle: '라이프 캘린더',
@@ -108,6 +107,7 @@
 
     const STORAGE_CONFIG_KEY = 'LIFE_CALENDAR_CUSTOM_CONFIG_V2';
     const STORAGE_LOGS_KEY = 'LIFE_CALENDAR_DAILY_LOGS_V2';
+    const STORAGE_GOALS_KEY = 'LIFE_CALENDAR_GOALS_V1';
     const DB_ROOT_PATH = 'lifeCalendar';
 
     const formatDateKey = (dateObj) => {
@@ -116,6 +116,15 @@
       const d = String(dateObj.getDate()).padStart(2, '0');
       return `${y}-${m}-${d}`;
     };
+
+    const getWeekKey = (dateKey) => {
+      const base = new Date(dateKey + 'T00:00:00');
+      const sunday = new Date(base);
+      sunday.setDate(base.getDate() - base.getDay());
+      return formatDateKey(sunday);
+    };
+
+    const getMonthKey = (dateKey) => dateKey.slice(0, 7); // YYYY-MM
 
     const getEmptyDayLog = () => ({
       workoutTags: [],
@@ -132,9 +141,7 @@
     });
 
     function App() {
-      // 동기화 상태 ('local' | 'connecting' | 'synced' | 'saving' | 'error')
       const [syncStatus, setSyncStatus] = useState(db ? 'connecting' : 'local');
-      const isRemoteUpdateRef = useRef(false);
 
       const [config, setConfig] = useState(() => {
         try {
@@ -154,24 +161,31 @@
         }
       });
 
-      // ==========================================
-      // Firebase 실시간 리스너 연결
-      // ==========================================
+      // 일 / 주 / 월 목표 상태: { daily: { 'YYYY-MM-DD': [...] }, weekly: { 'YYYY-MM-DD(일요일)': [...] }, monthly: { 'YYYY-MM': [...] } }
+      const [goals, setGoals] = useState(() => {
+        try {
+          const saved = localStorage.getItem(STORAGE_GOALS_KEY);
+          return saved ? JSON.parse(saved) : { daily: {}, weekly: {}, monthly: {} };
+        } catch (e) {
+          return { daily: {}, weekly: {}, monthly: {} };
+        }
+      });
+
+      // Firebase 실시간 리스너
       useEffect(() => {
         if (!db) return;
 
         const configRef = db.ref(`${DB_ROOT_PATH}/config`);
         const logsRef = db.ref(`${DB_ROOT_PATH}/logs`);
+        const goalsRef = db.ref(`${DB_ROOT_PATH}/goals`);
 
         const onConfigValue = (snapshot) => {
           const val = snapshot.val();
           if (val) {
-            isRemoteUpdateRef.current = true;
             const merged = { ...DEFAULT_CONFIG, ...val };
             setConfig(merged);
             localStorage.setItem(STORAGE_CONFIG_KEY, JSON.stringify(merged));
           } else {
-            // Firebase가 비어있으면 현재 로컬 설정을 초기 업로드
             configRef.set(config);
           }
           setSyncStatus('synced');
@@ -180,7 +194,6 @@
         const onLogsValue = (snapshot) => {
           const val = snapshot.val();
           if (val) {
-            isRemoteUpdateRef.current = true;
             setLogs(val);
             localStorage.setItem(STORAGE_LOGS_KEY, JSON.stringify(val));
           } else if (Object.keys(logs).length > 0) {
@@ -189,16 +202,31 @@
           setSyncStatus('synced');
         };
 
+        const onGoalsValue = (snapshot) => {
+          const val = snapshot.val();
+          if (val) {
+            const normalized = {
+              daily: val.daily || {},
+              weekly: val.weekly || {},
+              monthly: val.monthly || {}
+            };
+            setGoals(normalized);
+            localStorage.setItem(STORAGE_GOALS_KEY, JSON.stringify(normalized));
+          }
+          setSyncStatus('synced');
+        };
+
         configRef.on('value', onConfigValue, () => setSyncStatus('error'));
         logsRef.on('value', onLogsValue, () => setSyncStatus('error'));
+        goalsRef.on('value', onGoalsValue, () => setSyncStatus('error'));
 
         return () => {
           configRef.off('value', onConfigValue);
           logsRef.off('value', onLogsValue);
+          goalsRef.off('value', onGoalsValue);
         };
       }, []);
 
-      // 설정 변경 시 로컬 + Firebase 저장
       const saveConfig = (newConfig) => {
         setConfig(newConfig);
         localStorage.setItem(STORAGE_CONFIG_KEY, JSON.stringify(newConfig));
@@ -211,7 +239,6 @@
         }
       };
 
-      // 특정 날짜 기록 변경 시 로컬 + Firebase 해당 날짜 노드만 효율적으로 업데이트
       const updateDayLog = (updater) => {
         setLogs((prev) => {
           const existing = { ...getEmptyDayLog(), ...(prev[selectedDateKey] || {}) };
@@ -230,13 +257,24 @@
         });
       };
 
-      // 2. 캘린더 네비게이션 및 뷰 상태
+      // 캘린더 및 화면 상태
       const [viewMode, setViewMode] = useState('month');
       const [currentDate, setCurrentDate] = useState(new Date());
       const [selectedDateKey, setSelectedDateKey] = useState(formatDateKey(new Date()));
       const [activeTab, setActiveTab] = useState('workout');
       const [isEditConfigMode, setIsEditConfigMode] = useState(false);
       const [isEditingTitle, setIsEditingTitle] = useState(false);
+
+      // 검색 모달 상태
+      const [isSearchOpen, setIsSearchOpen] = useState(false);
+      const [searchQuery, setSearchQuery] = useState('');
+      const [searchFilter, setSearchFilter] = useState('all'); // 'all' | 'workout' | 'expense' | 'condition' | 'habit'
+
+      // 캘린더와 별개 목표 보드 상태
+      const [goalPeriod, setGoalPeriod] = useState('daily'); // 'daily' | 'weekly' | 'monthly'
+      const [goalInput, setGoalInput] = useState('');
+      const [editingGoalId, setEditingGoalId] = useState(null);
+      const [editingGoalText, setEditingGoalText] = useState('');
 
       // 새 항목 추가용 입력 상태
       const [newTagInput, setNewTagInput] = useState('');
@@ -261,7 +299,184 @@
         return { ...getEmptyDayLog(), ...(logs[selectedDateKey] || {}) };
       }, [logs, selectedDateKey]);
 
-      // 월간 / 주간 날짜 배열 계산
+      // ==========================================
+      // 일 / 주 / 월 목표 제어 함수
+      // ==========================================
+      const activeGoalBucketKey = useMemo(() => {
+        if (goalPeriod === 'daily') return selectedDateKey;
+        if (goalPeriod === 'weekly') return getWeekKey(selectedDateKey);
+        return getMonthKey(selectedDateKey);
+      }, [goalPeriod, selectedDateKey]);
+
+      const activeGoalLabel = useMemo(() => {
+        if (goalPeriod === 'daily') return `${selectedDateKey} 일 목표`;
+        if (goalPeriod === 'weekly') return `${activeGoalBucketKey} 주간 목표`;
+        return `${activeGoalBucketKey} 월간 목표`;
+      }, [goalPeriod, selectedDateKey, activeGoalBucketKey]);
+
+      const currentGoalList = useMemo(() => {
+        return (goals[goalPeriod]?.[activeGoalBucketKey]) || [];
+      }, [goals, goalPeriod, activeGoalBucketKey]);
+
+      const saveGoalsBucket = (nextBucketList) => {
+        setGoals((prev) => {
+          const nextGoals = {
+            ...prev,
+            [goalPeriod]: {
+              ...(prev[goalPeriod] || {}),
+              [activeGoalBucketKey]: nextBucketList
+            }
+          };
+          localStorage.setItem(STORAGE_GOALS_KEY, JSON.stringify(nextGoals));
+          if (db) {
+            setSyncStatus('saving');
+            db.ref(`${DB_ROOT_PATH}/goals/${goalPeriod}/${activeGoalBucketKey}`)
+              .set(nextBucketList)
+              .then(() => setSyncStatus('synced'))
+              .catch(() => setSyncStatus('error'));
+          }
+          return nextGoals;
+        });
+      };
+
+      const handleAddGoal = (e) => {
+        e.preventDefault();
+        if (!goalInput.trim()) return;
+        const newItem = {
+          id: 'g_' + Date.now(),
+          text: goalInput.trim(),
+          done: false
+        };
+        saveGoalsBucket([...currentGoalList, newItem]);
+        setGoalInput('');
+      };
+
+      const handleToggleGoal = (id) => {
+        saveGoalsBucket(
+          currentGoalList.map((g) => (g.id === id ? { ...g, done: !g.done } : g))
+        );
+      };
+
+      const handleDeleteGoal = (id) => {
+        saveGoalsBucket(currentGoalList.filter((g) => g.id !== id));
+      };
+
+      const handleSaveGoalEdit = (id) => {
+        if (!editingGoalText.trim()) return;
+        saveGoalsBucket(
+          currentGoalList.map((g) => (g.id === id ? { ...g, text: editingGoalText.trim() } : g))
+        );
+        setEditingGoalId(null);
+        setEditingGoalText('');
+      };
+
+      // ==========================================
+      // 전체 기록 검색 엔진
+      // ==========================================
+      const searchResults = useMemo(() => {
+        const q = searchQuery.trim().toLowerCase();
+        if (!q && searchFilter === 'all') return [];
+
+        const sortedDates = Object.keys(logs).sort((a, b) => b.localeCompare(a)); // 최신순
+        const results = [];
+
+        sortedDates.forEach((dateKey) => {
+          const l = { ...getEmptyDayLog(), ...(logs[dateKey] || {}) };
+          const matches = [];
+
+          // 1. 운동 검색
+          if (searchFilter === 'all' || searchFilter === 'workout') {
+            const matchedTags = (l.workoutTags || []).filter((t) => t.toLowerCase().includes(q));
+            if (matchedTags.length > 0 && q) {
+              matches.push({ type: 'workout', label: `운동 태그: ${matchedTags.join(', ')}` });
+            }
+            const matchedChecks = (l.workoutChecks || []).filter((c) => c.toLowerCase().includes(q));
+            if (matchedChecks.length > 0 && q) {
+              matches.push({ type: 'workout', label: `보강 루틴: ${matchedChecks.join(', ')}` });
+            }
+            config.workoutMetrics.forEach((m) => {
+              const val = l.workoutMetrics?.[m.id];
+              if (val && q && m.label.toLowerCase().includes(q)) {
+                matches.push({ type: 'workout', label: `${m.label}: ${val}${m.unit}` });
+              }
+            });
+            if (searchFilter === 'workout' && !q && (l.workoutTags.length > 0 || l.workoutChecks.length > 0)) {
+              matches.push({
+                type: 'workout',
+                label: [...l.workoutTags, ...l.workoutChecks].slice(0, 3).join(' · ')
+              });
+            }
+          }
+
+          // 2. 소비 검색
+          if (searchFilter === 'all' || searchFilter === 'expense') {
+            (l.expenses || []).forEach((ex) => {
+              const textHit =
+                !q ||
+                (ex.title && ex.title.toLowerCase().includes(q)) ||
+                (ex.category && ex.category.toLowerCase().includes(q)) ||
+                (ex.payment && ex.payment.toLowerCase().includes(q));
+              if (textHit && (q || searchFilter === 'expense')) {
+                matches.push({
+                  type: 'expense',
+                  label: `[${ex.category}] ${ex.title} — ${Number(ex.amount).toLocaleString()}원 (${ex.payment})`
+                });
+              }
+            });
+          }
+
+          // 3. 컨디션/아팠던 날/통증 검색
+          if (searchFilter === 'all' || searchFilter === 'condition') {
+            const sickHit = q && ('아팠'.includes(q) || '병가'.includes(q) || '몸살'.includes(q)) && l.isSick;
+            if (sickHit || (searchFilter === 'condition' && !q && l.isSick)) {
+              matches.push({ type: 'condition', label: '🤒 아팠던 날 표시됨' });
+            }
+            const matchedSyms = (l.symptoms || []).filter((s) => !q || s.toLowerCase().includes(q));
+            if (matchedSyms.length > 0 && (q || searchFilter === 'condition')) {
+              matches.push({ type: 'condition', label: `증상: ${matchedSyms.join(', ')}` });
+            }
+            Object.entries(l.painLevels || {}).forEach(([part, lv]) => {
+              if (Number(lv) > 0 && (!q || part.toLowerCase().includes(q))) {
+                matches.push({ type: 'condition', label: `${part}: Lv.${lv}` });
+              }
+            });
+          }
+
+          // 4. 습관 및 메모 검색
+          if (searchFilter === 'all' || searchFilter === 'habit') {
+            const matchedHabits = config.habits.filter(
+              (h) => l.habitsDone?.includes(h.id) && (!q || h.label.toLowerCase().includes(q))
+            );
+            if (matchedHabits.length > 0 && (q || searchFilter === 'habit')) {
+              matches.push({ type: 'habit', label: `루틴: ${matchedHabits.map((h) => h.label).join(', ')}` });
+            }
+          }
+
+          // 5. 자유 메모 검색
+          if (searchFilter === 'all' && q && l.dailyNote && l.dailyNote.toLowerCase().includes(q)) {
+            matches.push({ type: 'note', label: `메모: "${l.dailyNote}"` });
+          }
+
+          if (matches.length > 0) {
+            results.push({ dateKey, matches });
+          }
+        });
+
+        return results;
+      }, [logs, searchQuery, searchFilter, config]);
+
+      const jumpToSearchDate = (dateKey, matchType) => {
+        setSelectedDateKey(dateKey);
+        setCurrentDate(new Date(dateKey + 'T00:00:00'));
+        if (['workout', 'habit', 'condition', 'expense'].includes(matchType)) {
+          setActiveTab(matchType);
+        }
+        setIsSearchOpen(false);
+      };
+
+      // ==========================================
+      // 월간 / 주간 날짜 계산
+      // ==========================================
       const calendarDays = useMemo(() => {
         const year = currentDate.getFullYear();
         const month = currentDate.getMonth();
@@ -364,7 +579,7 @@
       }, [logs, viewMode, calendarDays, weekDays]);
 
       const handleExportData = () => {
-        const dataStr = JSON.stringify({ config, logs }, null, 2);
+        const dataStr = JSON.stringify({ config, logs, goals }, null, 2);
         const blob = new Blob([dataStr], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -386,7 +601,12 @@
               localStorage.setItem(STORAGE_LOGS_KEY, JSON.stringify(parsed.logs));
               if (db) db.ref(`${DB_ROOT_PATH}/logs`).set(parsed.logs);
             }
-            alert('백업 데이터를 불러오고 클라우드에 동기화했습니다!');
+            if (parsed.goals) {
+              setGoals(parsed.goals);
+              localStorage.setItem(STORAGE_GOALS_KEY, JSON.stringify(parsed.goals));
+              if (db) db.ref(`${DB_ROOT_PATH}/goals`).set(parsed.goals);
+            }
+            alert('백업 데이터를 불러오고 동기화했습니다!');
           } catch (err) {
             alert('올바른 백업 파일이 아닙니다.');
           }
@@ -444,7 +664,7 @@
       };
 
       return (
-        <div className="min-h-screen bg-[#090d16] text-slate-100 pb-12">
+        <div className="min-h-screen bg-[#090d16] text-slate-100 pb-14">
           {/* 상단 헤더 */}
           <header className="sticky top-0 z-30 bg-[#090d16]/95 backdrop-blur border-b border-slate-800 px-4 py-3">
             <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
@@ -473,6 +693,14 @@
               </div>
 
               <div className="flex items-center gap-2 flex-wrap">
+                {/* 기록 검색 버튼 */}
+                <button
+                  onClick={() => setIsSearchOpen(true)}
+                  className="px-3 py-1.5 text-xs sm:text-sm font-bold rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/50 text-indigo-300 transition"
+                >
+                  🔍 기록 검색
+                </button>
+
                 <div className="inline-flex rounded-lg bg-slate-900 p-1 border border-slate-800">
                   <button
                     onClick={() => setViewMode('month')}
@@ -521,10 +749,94 @@
             </div>
           </header>
 
+          {/* 전체 기록 검색 모달 */}
+          {isSearchOpen && (
+            <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
+              <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-2xl max-h-[85vh] flex flex-col overflow-hidden shadow-2xl">
+                <div className="p-4 border-b border-slate-800 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 font-bold text-base">
+                    <span>🔍</span>
+                    <span>전체 기록 검색</span>
+                  </div>
+                  <button
+                    onClick={() => setIsSearchOpen(false)}
+                    className="px-2.5 py-1 text-xs bg-slate-800 hover:bg-slate-700 rounded-lg text-slate-300"
+                  >
+                    닫기 ✕
+                  </button>
+                </div>
+
+                <div className="p-4 border-b border-slate-800 space-y-2.5 bg-slate-950/50">
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="예: 연남, 쌀, 아팠던, 보라 완등, 주유, 복압..."
+                    autoFocus
+                    className="w-full bg-slate-900 border border-slate-700 focus:border-indigo-500 rounded-xl px-3.5 py-2.5 text-sm outline-none"
+                  />
+                  <div className="flex flex-wrap gap-1.5">
+                    {[
+                      { id: 'all', label: '전체' },
+                      { id: 'workout', label: '💪 운동' },
+                      { id: 'expense', label: '💳 소비(구매내역)' },
+                      { id: 'condition', label: '🤒 아팠던날/통증' },
+                      { id: 'habit', label: '✨ 습관' }
+                    ].map((f) => (
+                      <button
+                        key={f.id}
+                        onClick={() => setSearchFilter(f.id)}
+                        className={`px-2.5 py-1 text-xs font-bold rounded-lg transition ${
+                          searchFilter === f.id
+                            ? 'bg-indigo-600 text-white'
+                            : 'bg-slate-800 text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        {f.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="p-4 overflow-y-auto space-y-2.5 flex-1">
+                  {searchQuery.trim() === '' && searchFilter === 'all' ? (
+                    <div className="text-center py-10 text-xs text-slate-400 space-y-1">
+                      <div>궁금한 키워드를 입력해 보세요.</div>
+                      <div className="text-slate-500">예: "연남"으로 클라이밍 방문일 찾기, "쌀"로 구매 시점 찾기</div>
+                    </div>
+                  ) : searchResults.length === 0 ? (
+                    <div className="text-center py-10 text-xs text-slate-500">일치하는 기록이 없습니다.</div>
+                  ) : (
+                    searchResults.map((res) => (
+                      <div
+                        key={res.dateKey}
+                        onClick={() => jumpToSearchDate(res.dateKey, res.matches[0]?.type)}
+                        className="p-3 rounded-xl bg-slate-950 border border-slate-800 hover:border-indigo-500 cursor-pointer transition"
+                      >
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-sm font-extrabold text-indigo-400">{res.dateKey}</span>
+                          <span className="text-[11px] text-slate-400">클릭해서 해당 날짜 열기 →</span>
+                        </div>
+                        <div className="space-y-1">
+                          {res.matches.map((m, idx) => (
+                            <div key={idx} className="text-xs text-slate-200 bg-slate-900/80 px-2.5 py-1.5 rounded-lg">
+                              {m.label}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* 메인 레이아웃 */}
           <main className="max-w-7xl mx-auto px-3 sm:px-4 pt-4 grid grid-cols-1 lg:grid-cols-12 gap-5">
-            {/* 좌측 7컬럼: 캘린더 */}
-            <section className="lg:col-span-7 flex flex-col gap-4">
+            {/* 좌측 7컬럼: 캘린더 + (별개 영역) 일/주/월 목표 보드 */}
+            <section className="lg:col-span-7 flex flex-col gap-5">
+              {/* 캘린더 요약 & 네비게이션 */}
               <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
@@ -555,7 +867,6 @@
                   </button>
                 </div>
 
-                {/* 요약 카드 */}
                 <div className="grid grid-cols-4 gap-2 pt-2 border-t border-slate-800/80 text-center">
                   <div className="bg-slate-950/60 rounded-xl p-2">
                     <div className="text-[11px] text-slate-400">{viewMode === 'month' ? '월 운동일' : '주간 운동일'}</div>
@@ -779,9 +1090,135 @@
                   })}
                 </div>
               )}
+
+              {/* ========================================== */}
+              {/* 캘린더와 별개의 [일 목표 / 주 목표 / 월 목표] 보드 */}
+              {/* ========================================== */}
+              <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="text-xs font-bold text-amber-400">캘린더 기록과 분리된 전용 목표판</div>
+                    <h3 className="text-base font-extrabold">{activeGoalLabel}</h3>
+                  </div>
+
+                  <div className="inline-flex rounded-lg bg-slate-950 p-1 border border-slate-800">
+                    {[
+                      { id: 'daily', label: '일 목표' },
+                      { id: 'weekly', label: '주 목표' },
+                      { id: 'monthly', label: '월 목표' }
+                    ].map((p) => (
+                      <button
+                        key={p.id}
+                        onClick={() => {
+                          setGoalPeriod(p.id);
+                          setEditingGoalId(null);
+                        }}
+                        className={`px-2.5 py-1 text-xs font-bold rounded-md transition ${
+                          goalPeriod === p.id ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <form onSubmit={handleAddGoal} className="flex gap-2">
+                  <input
+                    type="text"
+                    value={goalInput}
+                    onChange={(e) => setGoalInput(e.target.value)}
+                    placeholder={
+                      goalPeriod === 'daily'
+                        ? '오늘 꼭 해낼 일 목표 입력...'
+                        : goalPeriod === 'weekly'
+                        ? '이번 주 핵심 목표 입력...'
+                        : '이번 달 달성 목표 입력...'
+                    }
+                    className="flex-1 bg-slate-950 border border-slate-800 focus:border-amber-500 rounded-xl px-3 py-2 text-xs sm:text-sm outline-none"
+                  />
+                  <button
+                    type="submit"
+                    className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-xs sm:text-sm rounded-xl transition"
+                  >
+                    + 추가
+                  </button>
+                </form>
+
+                <div className="space-y-1.5">
+                  {currentGoalList.length === 0 ? (
+                    <div className="text-center py-4 text-xs text-slate-500 bg-slate-950/50 rounded-xl border border-slate-800/60">
+                      아직 등록된 {goalPeriod === 'daily' ? '일' : goalPeriod === 'weekly' ? '주' : '월'} 목표가 없습니다.
+                    </div>
+                  ) : (
+                    currentGoalList.map((g) => (
+                      <div
+                        key={g.id}
+                        className={`flex items-center justify-between gap-2 p-2.5 rounded-xl border transition ${
+                          g.done
+                            ? 'bg-emerald-950/25 border-emerald-500/30 text-slate-400'
+                            : 'bg-slate-950 border-slate-800 text-slate-100'
+                        }`}
+                      >
+                        {editingGoalId === g.id ? (
+                          <div className="flex items-center gap-1.5 flex-1">
+                            <input
+                              type="text"
+                              value={editingGoalText}
+                              onChange={(e) => setEditingGoalText(e.target.value)}
+                              onKeyDown={(e) => e.key === 'Enter' && handleSaveGoalEdit(g.id)}
+                              autoFocus
+                              className="flex-1 bg-slate-900 border border-indigo-500 rounded-lg px-2 py-1 text-xs outline-none"
+                            />
+                            <button
+                              onClick={() => handleSaveGoalEdit(g.id)}
+                              className="px-2 py-1 bg-indigo-600 text-white text-xs font-bold rounded-lg"
+                            >
+                              저장
+                            </button>
+                          </div>
+                        ) : (
+                          <div
+                            onClick={() => handleToggleGoal(g.id)}
+                            className="flex items-center gap-2.5 flex-1 cursor-pointer text-xs sm:text-sm"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={!!g.done}
+                              readOnly
+                              className="w-4 h-4 accent-emerald-500 rounded cursor-pointer"
+                            />
+                            <span className={g.done ? 'line-through text-slate-500' : 'font-medium'}>
+                              {g.text}
+                            </span>
+                          </div>
+                        )}
+
+                        <div className="flex items-center gap-1.5 text-xs">
+                          <button
+                            onClick={() => {
+                              setEditingGoalId(g.id);
+                              setEditingGoalText(g.text);
+                            }}
+                            className="text-slate-400 hover:text-indigo-400 px-1"
+                          >
+                            수정
+                          </button>
+                          <button
+                            onClick={() => handleDeleteGoal(g.id)}
+                            className="text-rose-400 hover:text-rose-300 px-1"
+                          >
+                            삭제
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
             </section>
 
-            {/* 우측 5컬럼: 상세 기록장 */}
+            {/* 우측 5컬럼: 선택한 날짜의 캘린더 상세 기록장 */}
             <section className="lg:col-span-5">
               <div className="bg-slate-900/95 border border-slate-800 rounded-2xl p-4 sticky top-16">
                 <div className="flex items-center justify-between pb-3 mb-3 border-b border-slate-800">
@@ -980,14 +1417,14 @@
                           type="text"
                           value={newMetricLabel}
                           onChange={(e) => setNewMetricLabel(e.target.value)}
-                          placeholder="+ 새 수치 항목명 (예: 빨강 완등, 사이클)"
+                          placeholder="+ 새 수치 항목명"
                           className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs outline-none"
                         />
                         <input
                           type="text"
                           value={newMetricUnit}
                           onChange={(e) => setNewMetricUnit(e.target.value)}
-                          placeholder="단위(개/km)"
+                          placeholder="단위"
                           className="w-16 bg-slate-950 border border-slate-800 rounded-lg px-2 py-1.5 text-xs text-center outline-none"
                         />
                         <button
@@ -1394,7 +1831,7 @@
                           type="text"
                           value={expTitle}
                           onChange={(e) => setExpTitle(e.target.value)}
-                          placeholder="내역 (예: 더클라임 일일권, 주유)"
+                          placeholder="내역 (예: 쌀 10kg, 더클라임 일일권)"
                           className="flex-1 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs outline-none"
                         />
                         <input
