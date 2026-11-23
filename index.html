@@ -84,11 +84,11 @@
         '코호흡 Zone 2 러닝 (5\'58"~6\'15" 페이스)'
       ],
       habits: [
-        { id: 'h_vocal', icon: '🎤', label: '방음부스 보컬 연습 (복압/목열기/텅트릴/믹스)' },
-        { id: 'h_jp', icon: '🇯🇵', label: '일본어 공부 (JLPT N2 문법/한자/가사)' },
-        { id: 'h_foam', icon: '🧘', label: 'EPP 폼롤러 광배근/어깨 근막이완' },
-        { id: 'h_read', icon: '📚', label: '독서 / 밀리의서재 / 웹툰·라노벨' },
-        { id: 'h_vocal_app', icon: '💻', label: '보컬 노트 스튜디오 곡/가사 마크업 정리' }
+        { id: 'h_vocal', icon: '🎤', label: '방음부스 보컬 연습 (복압/목열기/텅트릴/믹스)', defaultUnit: '분' },
+        { id: 'h_jp', icon: '🇯🇵', label: '일본어 공부 (JLPT N2 문법/한자/가사)', defaultUnit: '분' },
+        { id: 'h_foam', icon: '🧘', label: 'EPP 폼롤러 광배근/어깨 근막이완', defaultUnit: '분' },
+        { id: 'h_read', icon: '📚', label: '독서 / 밀리의서재 / 웹툰·라노벨', defaultUnit: '분' },
+        { id: 'h_vocal_app', icon: '💻', label: '보컬 노트 스튜디오 곡/가사 마크업 정리', defaultUnit: '곡' }
       ],
       conditionSymptoms: [
         '감기/몸살 기운', '인후통/목 잠김', '수면 부족/피로', '두통', '소화불량', '근육통 심함'
@@ -100,6 +100,9 @@
       expenseCategories: [
         '식비/카페', '클라이밍/운동', '음악/장비/악보', '아반떼 CN7/교통', '구독/게임', '생활/기타'
       ],
+      incomeCategories: [
+        '월급/급여', '상여/수당', '투자/배당', '중고거래/환급', '부수입/기타'
+      ],
       paymentMethods: [
         '카드 일시불', '카드 할부(실적제외)', '체크/계좌이체'
       ],
@@ -110,6 +113,8 @@
         { id: 'st_off', label: '휴무', defaultStart: '', defaultEnd: '', badgeColor: 'slate' }
       ]
     };
+
+    const HABIT_UNITS = ['분', '시간', '회', '쪽', '곡'];
 
     const STORAGE_CONFIG_KEY = 'LIFE_CALENDAR_CUSTOM_CONFIG_V2';
     const STORAGE_LOGS_KEY = 'LIFE_CALENDAR_DAILY_LOGS_V2';
@@ -139,11 +144,13 @@
       workoutChecks: [],
       workoutMemo: '',
       habitsDone: [],
+      habitDetails: {}, // { [habitId]: { value: '30', unit: '분' } }
       isSick: false,
       symptoms: [],
       painLevels: {},
       conditionMemo: '',
       expenses: [],
+      incomes: [], // [{ id, category, title, amount }]
       dailyNote: '',
       diaryTitle: '',
       diaryBody: '',
@@ -235,8 +242,6 @@
 
     function App() {
       const [syncStatus, setSyncStatus] = useState(db ? 'connecting' : 'local');
-
-      // 최상위 앱 섹션 ('calendar' | 'shift') - 캘린더와 근무표 완전 분리
       const [mainSection, setMainSection] = useState('calendar');
 
       const [config, setConfig] = useState(() => {
@@ -266,7 +271,6 @@
         }
       });
 
-      // 근무표 데이터: { 'YYYY-MM-DD': { typeId, label, startTime, endTime, overtimeHours, note } }
       const [shifts, setShifts] = useState(() => {
         try {
           const saved = localStorage.getItem(STORAGE_SHIFTS_KEY);
@@ -405,12 +409,12 @@
       const [isEditingTitle, setIsEditingTitle] = useState(false);
 
       // 근무표 탭 상태
-      const [shiftViewMode, setShiftViewMode] = useState('week'); // 'week' | 'month'
+      const [shiftViewMode, setShiftViewMode] = useState('week');
       const [newShiftTypeLabel, setNewShiftTypeLabel] = useState('');
       const [newShiftStart, setNewShiftStart] = useState('09:00');
       const [newShiftEnd, setNewShiftEnd] = useState('18:00');
 
-      // 더블클릭/상세 일기 모달 상태
+      // 일기 모달 상태
       const [diaryModalDateKey, setDiaryModalDateKey] = useState(null);
       const [lightboxPhoto, setLightboxPhoto] = useState(null);
       const [videoTitleInput, setVideoTitleInput] = useState('');
@@ -436,17 +440,25 @@
       const [newCheckInput, setNewCheckInput] = useState('');
       const [newHabitIcon, setNewHabitIcon] = useState('🔥');
       const [newHabitLabel, setNewHabitLabel] = useState('');
+      const [newHabitUnit, setNewHabitUnit] = useState('분');
       const [newSymptomInput, setNewSymptomInput] = useState('');
       const [newBodyPartInput, setNewBodyPartInput] = useState('');
       const [newCategoryInput, setNewCategoryInput] = useState('');
+      const [newIncomeCategoryInput, setNewIncomeCategoryInput] = useState('');
       const [newPaymentInput, setNewPaymentInput] = useState('');
 
-      // 가계부 지출 입력 상태
+      // 가계부(소비/수입) 입력 상태
+      const [moneyMode, setMoneyMode] = useState('expense'); // 'expense' | 'income'
       const [expCategory, setExpCategory] = useState(config.expenseCategories[0] || '식비/카페');
       const [expPayment, setExpPayment] = useState(config.paymentMethods[0] || '카드 일시불');
       const [expTitle, setExpTitle] = useState('');
       const [expAmount, setExpAmount] = useState('');
       const [editingExpenseId, setEditingExpenseId] = useState(null);
+
+      const [incCategory, setIncCategory] = useState((config.incomeCategories || DEFAULT_CONFIG.incomeCategories)[0]);
+      const [incTitle, setIncTitle] = useState('');
+      const [incAmount, setIncAmount] = useState('');
+      const [editingIncomeId, setEditingIncomeId] = useState(null);
 
       const currentDayLog = useMemo(() => {
         return { ...getEmptyDayLog(), ...(logs[selectedDateKey] || {}) };
@@ -543,7 +555,25 @@
         );
       };
 
-      // 일 / 주 / 월 목표 제어 함수
+      // 습관 시간/횟수 업데이트
+      const handleUpdateHabitDetail = (habitId, defaultUnit, field, val) => {
+        updateDayLog((prev) => {
+          const prevDetails = prev.habitDetails || {};
+          const cur = prevDetails[habitId] || { value: '', unit: defaultUnit || '분' };
+          const nextItem = { ...cur, [field]: val };
+          const nextDetails = { ...prevDetails, [habitId]: nextItem };
+
+          let nextDone = [...(prev.habitsDone || [])];
+          if (field === 'value') {
+            if (String(val).trim() !== '' && Number(val) > 0 && !nextDone.includes(habitId)) {
+              nextDone.push(habitId);
+            }
+          }
+          return { ...prev, habitDetails: nextDetails, habitsDone: nextDone };
+        });
+      };
+
+      // 일 / 주 / 월 목표 제어
       const activeGoalBucketKey = useMemo(() => {
         if (goalPeriod === 'daily') return selectedDateKey;
         if (goalPeriod === 'weekly') return getWeekKey(selectedDateKey);
@@ -650,7 +680,19 @@
               if (textHit && (q || searchFilter === 'expense')) {
                 matches.push({
                   type: 'expense',
-                  label: `[${ex.category}] ${ex.title} — ${Number(ex.amount).toLocaleString()}원 (${ex.payment})`
+                  label: `[지출/${ex.category}] ${ex.title} — -${Number(ex.amount).toLocaleString()}원 (${ex.payment})`
+                });
+              }
+            });
+            (l.incomes || []).forEach((inc) => {
+              const textHit =
+                !q ||
+                (inc.title && inc.title.toLowerCase().includes(q)) ||
+                (inc.category && inc.category.toLowerCase().includes(q));
+              if (textHit && (q || searchFilter === 'expense')) {
+                matches.push({
+                  type: 'expense',
+                  label: `[수입/${inc.category}] ${inc.title} — +${Number(inc.amount).toLocaleString()}원`
                 });
               }
             });
@@ -677,7 +719,13 @@
               (h) => l.habitsDone?.includes(h.id) && (!q || h.label.toLowerCase().includes(q))
             );
             if (matchedHabits.length > 0 && (q || searchFilter === 'habit')) {
-              matches.push({ type: 'habit', label: `루틴: ${matchedHabits.map((h) => h.label).join(', ')}` });
+              const habitText = matchedHabits
+                .map((h) => {
+                  const det = l.habitDetails?.[h.id];
+                  return det?.value ? `${h.label}(${det.value}${det.unit || h.defaultUnit || '분'})` : h.label;
+                })
+                .join(', ');
+              matches.push({ type: 'habit', label: `루틴: ${habitText}` });
             }
           }
 
@@ -780,6 +828,7 @@
         setSelectedDateKey(formatDateKey(now));
       };
 
+      // 월간 / 주간 요약 통계 (수입 포함)
       const summaryStats = useMemo(() => {
         const targetKeys = viewMode === 'month'
           ? calendarDays.filter((d) => d.isCurrentMonth).map((d) => d.key)
@@ -787,6 +836,7 @@
 
         let workoutDays = 0;
         let sickDays = 0;
+        let totalIncome = 0;
         let totalExpense = 0;
         let lumpSumExpense = 0;
         let installmentExpense = 0;
@@ -801,6 +851,10 @@
           if (hasWorkout) workoutDays++;
           if (l.isSick) sickDays++;
 
+          (l.incomes || []).forEach((inc) => {
+            totalIncome += Number(inc.amount) || 0;
+          });
+
           (l.expenses || []).forEach((exp) => {
             const amt = Number(exp.amount) || 0;
             totalExpense += amt;
@@ -812,10 +866,10 @@
           });
         });
 
-        return { workoutDays, sickDays, totalExpense, lumpSumExpense, installmentExpense };
+        return { workoutDays, sickDays, totalIncome, totalExpense, lumpSumExpense, installmentExpense };
       }, [logs, viewMode, calendarDays, weekDays]);
 
-      // 근무표 요약 집계 (주간/월간)
+      // 근무표 요약 집계
       const shiftStats = useMemo(() => {
         const targetKeys = shiftViewMode === 'month'
           ? calendarDays.filter((d) => d.isCurrentMonth).map((d) => d.key)
@@ -921,7 +975,40 @@
         setEditingExpenseId(null);
       };
 
+      const handleSaveIncome = (e) => {
+        e.preventDefault();
+        if (!incTitle.trim() || !incAmount) return;
+
+        updateDayLog((prev) => {
+          const list = [...(prev.incomes || [])];
+          if (editingIncomeId) {
+            const idx = list.findIndex((item) => item.id === editingIncomeId);
+            if (idx > -1) {
+              list[idx] = {
+                ...list[idx],
+                category: incCategory,
+                title: incTitle.trim(),
+                amount: Number(incAmount)
+              };
+            }
+          } else {
+            list.push({
+              id: 'inc_' + Date.now(),
+              category: incCategory,
+              title: incTitle.trim(),
+              amount: Number(incAmount)
+            });
+          }
+          return { ...prev, incomes: list };
+        });
+
+        setIncTitle('');
+        setIncAmount('');
+        setEditingIncomeId(null);
+      };
+
       const korWeekNames = ['일', '월', '화', '수', '목', '금', '토'];
+      const incomeCategories = config.incomeCategories || DEFAULT_CONFIG.incomeCategories;
 
       const renderSyncBadge = () => {
         if (syncStatus === 'synced') {
@@ -965,7 +1052,7 @@
                   )}
                 </div>
 
-                {/* 메인 섹션 분리 탭: 캘린더 vs 근무표 */}
+                {/* 메인 섹션 분리 탭 */}
                 <div className="inline-flex rounded-xl bg-slate-900 p-1 border border-slate-700">
                   <button
                     onClick={() => setMainSection('calendar')}
@@ -1265,7 +1352,7 @@
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="예: 연남, 쌀, 아팠던, 보라 완등, 주유, 일기..."
+                    placeholder="예: 연남, 쌀, 월급, 아팠던, 보라 완등, 주유, 일기..."
                     autoFocus
                     className="w-full bg-slate-900 border border-slate-700 focus:border-indigo-500 rounded-xl px-3.5 py-2.5 text-sm outline-none"
                   />
@@ -1273,7 +1360,7 @@
                     {[
                       { id: 'all', label: '전체' },
                       { id: 'workout', label: '💪 운동' },
-                      { id: 'expense', label: '💳 소비(구매내역)' },
+                      { id: 'expense', label: '💳 소비/수입' },
                       { id: 'condition', label: '🤒 아팠던날/통증' },
                       { id: 'habit', label: '✨ 습관' }
                     ].map((f) => (
@@ -1331,7 +1418,7 @@
           {/* ========================================== */}
           {mainSection === 'calendar' && (
             <main className="max-w-7xl mx-auto px-3 sm:px-4 pt-4 grid grid-cols-1 lg:grid-cols-12 gap-5">
-              {/* 좌측 7컬럼: 캘린더 + (별개 영역) 일/주/월 목표 보드 */}
+              {/* 좌측 7컬럼: 캘린더 + 일/주/월 목표 보드 */}
               <section className="lg:col-span-7 flex flex-col gap-5">
                 <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3">
                   <div className="flex items-center justify-between">
@@ -1363,7 +1450,8 @@
                     </button>
                   </div>
 
-                  <div className="grid grid-cols-4 gap-2 pt-2 border-t border-slate-800/80 text-center">
+                  {/* 월간/주간 핵심 요약 카드 (수입 추가) */}
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-2 border-t border-slate-800/80 text-center">
                     <div className="bg-slate-950/60 rounded-xl p-2">
                       <div className="text-[11px] text-slate-400">{viewMode === 'month' ? '월 운동일' : '주간 운동일'}</div>
                       <div className="text-sm sm:text-base font-bold text-emerald-400">{summaryStats.workoutDays}일</div>
@@ -1373,15 +1461,21 @@
                       <div className="text-sm sm:text-base font-bold text-rose-400">{summaryStats.sickDays}일</div>
                     </div>
                     <div className="bg-slate-950/60 rounded-xl p-2">
-                      <div className="text-[11px] text-slate-400">일시불/체크</div>
-                      <div className="text-xs sm:text-sm font-bold text-sky-400">
-                        {summaryStats.lumpSumExpense.toLocaleString()}원
+                      <div className="text-[11px] text-slate-400">{viewMode === 'month' ? '이번달 수입' : '주간 수입'}</div>
+                      <div className="text-xs sm:text-sm font-bold text-teal-400">
+                        +{summaryStats.totalIncome.toLocaleString()}원
                       </div>
                     </div>
                     <div className="bg-slate-950/60 rounded-xl p-2">
+                      <div className="text-[11px] text-slate-400">일시불/체크</div>
+                      <div className="text-xs sm:text-sm font-bold text-sky-400">
+                        -{summaryStats.lumpSumExpense.toLocaleString()}원
+                      </div>
+                    </div>
+                    <div className="bg-slate-950/60 rounded-xl p-2 col-span-2 sm:col-span-1">
                       <div className="text-[11px] text-slate-400">할부(실적제외)</div>
                       <div className="text-xs sm:text-sm font-bold text-amber-400">
-                        {summaryStats.installmentExpense.toLocaleString()}원
+                        -{summaryStats.installmentExpense.toLocaleString()}원
                       </div>
                     </div>
                   </div>
@@ -1418,6 +1512,7 @@
                           ? Math.max(0, ...Object.values(dLog.painLevels).map(Number))
                           : 0;
                         const dayExpense = (dLog?.expenses || []).reduce((acc, cur) => acc + (Number(cur.amount) || 0), 0);
+                        const dayIncome = (dLog?.incomes || []).reduce((acc, cur) => acc + (Number(cur.amount) || 0), 0);
                         const hasDiaryMedia =
                           (dLog?.diaryBody && dLog.diaryBody.trim().length > 0) ||
                           (dLog?.photos && dLog.photos.length > 0) ||
@@ -1468,6 +1563,11 @@
                                   ✨ 루틴 {habitCount}개
                                 </div>
                               )}
+                              {dayIncome > 0 && (
+                                <div className="text-[10px] text-teal-300 font-semibold truncate px-0.5">
+                                  +{dayIncome >= 10000 ? `${(dayIncome / 10000).toFixed(1)}만` : `${dayIncome.toLocaleString()}`}
+                                </div>
+                              )}
                               {dayExpense > 0 && (
                                 <div className="text-[10px] text-amber-300/90 font-semibold truncate px-0.5">
                                   -{dayExpense >= 10000 ? `${(dayExpense / 10000).toFixed(1)}만` : `${dayExpense.toLocaleString()}`}
@@ -1489,6 +1589,7 @@
                       const isSelected = item.key === selectedDateKey;
                       const isToday = item.key === formatDateKey(new Date());
                       const dayExpense = (dLog.expenses || []).reduce((acc, cur) => acc + (Number(cur.amount) || 0), 0);
+                      const dayIncome = (dLog.incomes || []).reduce((acc, cur) => acc + (Number(cur.amount) || 0), 0);
 
                       return (
                         <div
@@ -1517,9 +1618,14 @@
                               )}
                             </div>
                             <div className="flex items-center gap-2">
+                              {dayIncome > 0 && (
+                                <span className="text-xs font-bold text-teal-300 bg-teal-500/10 px-2 py-1 rounded-lg">
+                                  +{dayIncome.toLocaleString()}원
+                                </span>
+                              )}
                               {dayExpense > 0 && (
-                                <span className="text-xs font-bold text-amber-400 bg-amber-500/10 px-2.5 py-1 rounded-lg">
-                                  지출 {dayExpense.toLocaleString()}원
+                                <span className="text-xs font-bold text-amber-400 bg-amber-500/10 px-2 py-1 rounded-lg">
+                                  -{dayExpense.toLocaleString()}원
                                 </span>
                               )}
                               <button
@@ -1574,17 +1680,21 @@
                                 <div className="flex flex-col gap-1">
                                   {config.habits
                                     .filter((h) => dLog.habitsDone.includes(h.id))
-                                    .map((h) => (
-                                      <span key={h.id} className="text-violet-300 truncate">
-                                        {h.icon} {h.label}
-                                      </span>
-                                    ))}
+                                    .map((h) => {
+                                      const det = dLog.habitDetails?.[h.id];
+                                      return (
+                                        <span key={h.id} className="text-violet-300 truncate">
+                                          {h.icon} {h.label}
+                                          {det?.value ? ` (${det.value}${det.unit || h.defaultUnit || '분'})` : ''}
+                                        </span>
+                                      );
+                                    })}
                                 </div>
                               )}
                             </div>
 
                             <div className="bg-slate-950/60 rounded-xl p-2.5 border border-slate-800/60">
-                              <div className="text-slate-400 font-semibold mb-1">🩹 컨디션 & 소비</div>
+                              <div className="text-slate-400 font-semibold mb-1">🩹 컨디션 & 소비/수입</div>
                               <div className="flex flex-col gap-1">
                                 {Object.entries(dLog.painLevels || {})
                                   .filter(([_, lv]) => Number(lv) > 0)
@@ -1593,9 +1703,14 @@
                                       • {part}: Lv.{lv}
                                     </span>
                                   ))}
+                                {(dLog.incomes || []).map((inc) => (
+                                  <span key={inc.id} className="text-teal-300 truncate">
+                                    • {inc.title} (+{Number(inc.amount).toLocaleString()}원)
+                                  </span>
+                                ))}
                                 {(dLog.expenses || []).map((ex) => (
                                   <span key={ex.id} className="text-amber-300 truncate">
-                                    • {ex.title} ({Number(ex.amount).toLocaleString()}원)
+                                    • {ex.title} (-{Number(ex.amount).toLocaleString()}원)
                                   </span>
                                 ))}
                                 {dLog.dailyNote && <span className="text-slate-300 italic truncate">"{dLog.dailyNote}"</span>}
@@ -1761,7 +1876,7 @@
                       { id: 'workout', label: '💪 운동' },
                       { id: 'habit', label: '✨ 습관' },
                       { id: 'condition', label: '🤒 컨디션' },
-                      { id: 'expense', label: '💳 소비' }
+                      { id: 'expense', label: '💳 소비/수입' }
                     ].map((t) => (
                       <button
                         key={t.id}
@@ -2058,13 +2173,20 @@
                     </div>
                   )}
 
-                  {/* 탭 2: 습관 */}
+                  {/* 탭 2: 습관 (시간/횟수 기록 지원) */}
                   {activeTab === 'habit' && (
                     <div className="space-y-3 max-h-[65vh] overflow-y-auto pr-1">
-                      <div className="text-xs font-bold text-slate-400">일일 루틴 체크 (자유 추가·편집 가능)</div>
+                      <div className="text-xs font-bold text-slate-400">
+                        일일 루틴 체크 (시간/횟수 입력 시 자동 완료 처리)
+                      </div>
                       <div className="space-y-2">
                         {config.habits.map((h) => {
                           const done = currentDayLog.habitsDone.includes(h.id);
+                          const det = currentDayLog.habitDetails?.[h.id] || {
+                            value: '',
+                            unit: h.defaultUnit || '분'
+                          };
+
                           return (
                             <div
                               key={h.id}
@@ -2077,18 +2199,19 @@
                                     : [...prev.habitsDone, h.id]
                                 }));
                               }}
-                              className={`flex items-center justify-between p-3 rounded-xl border transition cursor-pointer ${
+                              className={`flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-3 rounded-xl border transition cursor-pointer ${
                                 done
                                   ? 'bg-violet-950/50 border-violet-500 text-violet-200'
                                   : 'bg-slate-950 border-slate-800 text-slate-300'
                               }`}
                             >
-                              <div className="flex items-center gap-2.5 flex-1">
-                                <span className="text-lg">{h.icon}</span>
+                              <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                                <span className="text-lg shrink-0">{h.icon}</span>
                                 {isEditConfigMode ? (
                                   <input
                                     type="text"
                                     value={h.label}
+                                    onClick={(e) => e.stopPropagation()}
                                     onChange={(e) => {
                                       const updated = config.habits.map((item) =>
                                         item.id === h.id ? { ...item, label: e.target.value } : item
@@ -2098,25 +2221,67 @@
                                     className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs w-full"
                                   />
                                 ) : (
-                                  <span className="text-xs sm:text-sm font-semibold">{h.label}</span>
+                                  <span className="text-xs sm:text-sm font-semibold truncate">{h.label}</span>
                                 )}
                               </div>
-                              {isEditConfigMode ? (
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    saveConfig({
-                                      ...config,
-                                      habits: config.habits.filter((item) => item.id !== h.id)
-                                    });
-                                  }}
-                                  className="text-rose-400 text-xs font-bold px-2"
+
+                              <div
+                                className="flex items-center gap-1.5 shrink-0 justify-end"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.5"
+                                  value={det.value}
+                                  onChange={(e) =>
+                                    handleUpdateHabitDetail(h.id, h.defaultUnit, 'value', e.target.value)
+                                  }
+                                  placeholder="0"
+                                  className="w-14 bg-slate-900 border border-slate-700 focus:border-violet-400 rounded-lg px-2 py-1 text-xs text-center font-bold text-white outline-none"
+                                />
+                                <select
+                                  value={det.unit || h.defaultUnit || '분'}
+                                  onChange={(e) =>
+                                    handleUpdateHabitDetail(h.id, h.defaultUnit, 'unit', e.target.value)
+                                  }
+                                  className="bg-slate-900 border border-slate-700 rounded-lg px-1.5 py-1 text-[11px] text-slate-200 outline-none"
                                 >
-                                  ✕
-                                </button>
-                              ) : (
-                                <span className="text-xs font-bold">{done ? '완료 ✓' : '미완료'}</span>
-                              )}
+                                  {HABIT_UNITS.map((u) => (
+                                    <option key={u} value={u}>{u}</option>
+                                  ))}
+                                </select>
+
+                                {isEditConfigMode ? (
+                                  <button
+                                    onClick={() =>
+                                      saveConfig({
+                                        ...config,
+                                        habits: config.habits.filter((item) => item.id !== h.id)
+                                      })
+                                    }
+                                    className="text-rose-400 text-xs font-bold px-1.5"
+                                  >
+                                    ✕
+                                  </button>
+                                ) : (
+                                  <button
+                                    onClick={() =>
+                                      updateDayLog((prev) => ({
+                                        ...prev,
+                                        habitsDone: done
+                                          ? prev.habitsDone.filter((id) => id !== h.id)
+                                          : [...prev.habitsDone, h.id]
+                                      }))
+                                    }
+                                    className={`text-[11px] font-bold px-2 py-1 rounded-lg min-w-[52px] ${
+                                      done ? 'bg-violet-600 text-white' : 'bg-slate-800 text-slate-400'
+                                    }`}
+                                  >
+                                    {done ? '완료 ✓' : '미완료'}
+                                  </button>
+                                )}
+                              </div>
                             </div>
                           );
                         })}
@@ -2127,16 +2292,25 @@
                           type="text"
                           value={newHabitIcon}
                           onChange={(e) => setNewHabitIcon(e.target.value)}
-                          className="w-12 text-center bg-slate-950 border border-slate-800 rounded-lg py-1.5 text-sm"
+                          className="w-11 text-center bg-slate-950 border border-slate-800 rounded-lg py-1.5 text-sm"
                           placeholder="🔥"
                         />
                         <input
                           type="text"
                           value={newHabitLabel}
                           onChange={(e) => setNewHabitLabel(e.target.value)}
-                          placeholder="+ 새로운 습관/루틴 이름 입력"
+                          placeholder="+ 새로운 습관/루틴 이름"
                           className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs outline-none"
                         />
+                        <select
+                          value={newHabitUnit}
+                          onChange={(e) => setNewHabitUnit(e.target.value)}
+                          className="bg-slate-950 border border-slate-800 rounded-lg px-1.5 py-1.5 text-xs outline-none"
+                        >
+                          {HABIT_UNITS.map((u) => (
+                            <option key={u} value={u}>{u}</option>
+                          ))}
+                        </select>
                         <button
                           onClick={() => {
                             if (!newHabitLabel.trim()) return;
@@ -2147,7 +2321,8 @@
                                 {
                                   id: 'h_' + Date.now(),
                                   icon: newHabitIcon || '✨',
-                                  label: newHabitLabel.trim()
+                                  label: newHabitLabel.trim(),
+                                  defaultUnit: newHabitUnit
                                 }
                               ]
                             });
@@ -2322,75 +2497,207 @@
                     </div>
                   )}
 
-                  {/* 탭 4: 소비 */}
+                  {/* 탭 4: 소비 / 수입 */}
                   {activeTab === 'expense' && (
                     <div className="space-y-4 max-h-[65vh] overflow-y-auto pr-1">
-                      <form onSubmit={handleSaveExpense} className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2.5">
-                        <div className="text-xs font-bold text-slate-400">
-                          {editingExpenseId ? '✏️ 지출 내역 수정' : '+ 새 지출 기록 추가'}
-                        </div>
-                        <div className="grid grid-cols-2 gap-2">
+                      {/* 지출 / 수입 전환 스위치 */}
+                      <div className="grid grid-cols-2 gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800">
+                        <button
+                          onClick={() => setMoneyMode('expense')}
+                          className={`py-1.5 text-xs font-bold rounded-lg transition ${
+                            moneyMode === 'expense'
+                              ? 'bg-amber-500 text-slate-950'
+                              : 'text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          💸 지출 기록
+                        </button>
+                        <button
+                          onClick={() => setMoneyMode('income')}
+                          className={`py-1.5 text-xs font-bold rounded-lg transition ${
+                            moneyMode === 'income'
+                              ? 'bg-teal-500 text-slate-950'
+                              : 'text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          💰 수입 기록
+                        </button>
+                      </div>
+
+                      {/* 지출 입력 폼 */}
+                      {moneyMode === 'expense' && (
+                        <form onSubmit={handleSaveExpense} className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2.5">
+                          <div className="text-xs font-bold text-amber-300">
+                            {editingExpenseId ? '✏️ 지출 내역 수정' : '+ 새 지출 기록 추가'}
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <select
+                              value={expCategory}
+                              onChange={(e) => setExpCategory(e.target.value)}
+                              className="bg-slate-900 border border-slate-800 rounded-lg px-2 py-1.5 text-xs outline-none"
+                            >
+                              {config.expenseCategories.map((c) => (
+                                <option key={c} value={c}>{c}</option>
+                              ))}
+                            </select>
+                            <select
+                              value={expPayment}
+                              onChange={(e) => setExpPayment(e.target.value)}
+                              className="bg-slate-900 border border-slate-800 rounded-lg px-2 py-1.5 text-xs outline-none"
+                            >
+                              {config.paymentMethods.map((p) => (
+                                <option key={p} value={p}>{p}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={expTitle}
+                              onChange={(e) => setExpTitle(e.target.value)}
+                              placeholder="내역 (예: 쌀 10kg, 더클라임 일일권)"
+                              className="flex-1 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs outline-none"
+                            />
+                            <input
+                              type="number"
+                              value={expAmount}
+                              onChange={(e) => setExpAmount(e.target.value)}
+                              placeholder="금액(원)"
+                              className="w-28 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs outline-none"
+                            />
+                          </div>
+                          <div className="flex gap-2">
+                            <button
+                              type="submit"
+                              className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-lg"
+                            >
+                              {editingExpenseId ? '수정 완료' : '지출 추가'}
+                            </button>
+                            {editingExpenseId && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingExpenseId(null);
+                                  setExpTitle('');
+                                  setExpAmount('');
+                                }}
+                                className="px-3 py-2 bg-slate-800 text-xs rounded-lg"
+                              >
+                                취소
+                              </button>
+                            )}
+                          </div>
+                        </form>
+                      )}
+
+                      {/* 수입 입력 폼 */}
+                      {moneyMode === 'income' && (
+                        <form onSubmit={handleSaveIncome} className="bg-slate-950 border border-teal-500/40 rounded-xl p-3 space-y-2.5">
+                          <div className="text-xs font-bold text-teal-300">
+                            {editingIncomeId ? '✏️ 수입 내역 수정' : '+ 새 수입 기록 추가'}
+                          </div>
                           <select
-                            value={expCategory}
-                            onChange={(e) => setExpCategory(e.target.value)}
-                            className="bg-slate-900 border border-slate-800 rounded-lg px-2 py-1.5 text-xs outline-none"
+                            value={incCategory}
+                            onChange={(e) => setIncCategory(e.target.value)}
+                            className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2 py-1.5 text-xs outline-none"
                           >
-                            {config.expenseCategories.map((c) => (
+                            {incomeCategories.map((c) => (
                               <option key={c} value={c}>{c}</option>
                             ))}
                           </select>
-                          <select
-                            value={expPayment}
-                            onChange={(e) => setExpPayment(e.target.value)}
-                            className="bg-slate-900 border border-slate-800 rounded-lg px-2 py-1.5 text-xs outline-none"
-                          >
-                            {config.paymentMethods.map((p) => (
-                              <option key={p} value={p}>{p}</option>
-                            ))}
-                          </select>
-                        </div>
-                        <div className="flex gap-2">
-                          <input
-                            type="text"
-                            value={expTitle}
-                            onChange={(e) => setExpTitle(e.target.value)}
-                            placeholder="내역 (예: 쌀 10kg, 더클라임 일일권)"
-                            className="flex-1 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs outline-none"
-                          />
-                          <input
-                            type="number"
-                            value={expAmount}
-                            onChange={(e) => setExpAmount(e.target.value)}
-                            placeholder="금액(원)"
-                            className="w-28 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs outline-none"
-                          />
-                        </div>
-                        <div className="flex gap-2">
-                          <button
-                            type="submit"
-                            className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-lg"
-                          >
-                            {editingExpenseId ? '수정 완료' : '지출 추가'}
-                          </button>
-                          {editingExpenseId && (
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={incTitle}
+                              onChange={(e) => setIncTitle(e.target.value)}
+                              placeholder="내역 (예: 11월 급여, 당근 판매)"
+                              className="flex-1 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs outline-none"
+                            />
+                            <input
+                              type="number"
+                              value={incAmount}
+                              onChange={(e) => setIncAmount(e.target.value)}
+                              placeholder="금액(원)"
+                              className="w-28 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs outline-none"
+                            />
+                          </div>
+                          <div className="flex gap-2">
                             <button
-                              type="button"
-                              onClick={() => {
-                                setEditingExpenseId(null);
-                                setExpTitle('');
-                                setExpAmount('');
-                              }}
-                              className="px-3 py-2 bg-slate-800 text-xs rounded-lg"
+                              type="submit"
+                              className="flex-1 py-2 bg-teal-600 hover:bg-teal-500 text-white font-bold text-xs rounded-lg"
                             >
-                              취소
+                              {editingIncomeId ? '수정 완료' : '수입 추가'}
                             </button>
-                          )}
-                        </div>
-                      </form>
+                            {editingIncomeId && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingIncomeId(null);
+                                  setIncTitle('');
+                                  setIncAmount('');
+                                }}
+                                className="px-3 py-2 bg-slate-800 text-xs rounded-lg"
+                              >
+                                취소
+                              </button>
+                            )}
+                          </div>
+                        </form>
+                      )}
 
+                      {/* 당일 수입 내역 목록 */}
+                      {(currentDayLog.incomes || []).length > 0 && (
+                        <div className="space-y-1.5">
+                          <div className="text-[11px] font-bold text-teal-400">💰 당일 수입</div>
+                          {currentDayLog.incomes.map((item) => (
+                            <div
+                              key={item.id}
+                              className="flex items-center justify-between bg-teal-950/25 border border-teal-500/30 rounded-xl px-3 py-2 text-xs"
+                            >
+                              <div>
+                                <span className="bg-teal-500/20 text-teal-300 px-1.5 py-0.5 rounded text-[10px]">
+                                  {item.category}
+                                </span>
+                                <div className="font-bold text-slate-200 mt-1">{item.title}</div>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="font-extrabold text-teal-300">
+                                  +{Number(item.amount).toLocaleString()}원
+                                </span>
+                                <button
+                                  onClick={() => {
+                                    setMoneyMode('income');
+                                    setEditingIncomeId(item.id);
+                                    setIncCategory(item.category);
+                                    setIncTitle(item.title);
+                                    setIncAmount(item.amount);
+                                  }}
+                                  className="text-slate-400 hover:text-indigo-400"
+                                >
+                                  수정
+                                </button>
+                                <button
+                                  onClick={() =>
+                                    updateDayLog((prev) => ({
+                                      ...prev,
+                                      incomes: (prev.incomes || []).filter((i) => i.id !== item.id)
+                                    }))
+                                  }
+                                  className="text-rose-400 hover:text-rose-300"
+                                >
+                                  삭제
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* 당일 지출 내역 목록 */}
                       <div className="space-y-1.5">
+                        <div className="text-[11px] font-bold text-amber-400">💸 당일 지출</div>
                         {(currentDayLog.expenses || []).length === 0 ? (
-                          <div className="text-center py-4 text-xs text-slate-500">기록된 지출이 없습니다.</div>
+                          <div className="text-center py-3 text-xs text-slate-500">기록된 지출이 없습니다.</div>
                         ) : (
                           currentDayLog.expenses.map((item) => (
                             <div
@@ -2416,10 +2723,11 @@
                               </div>
                               <div className="flex items-center gap-2">
                                 <span className="font-extrabold text-amber-400">
-                                  {Number(item.amount).toLocaleString()}원
+                                  -{Number(item.amount).toLocaleString()}원
                                 </span>
                                 <button
                                   onClick={() => {
+                                    setMoneyMode('expense');
                                     setEditingExpenseId(item.id);
                                     setExpCategory(item.category);
                                     setExpPayment(item.payment);
@@ -2494,6 +2802,50 @@
                           </div>
 
                           <div>
+                            <div className="text-xs font-bold text-teal-300 mb-1.5">수입 카테고리 편집</div>
+                            <div className="flex flex-wrap gap-1 mb-2">
+                              {incomeCategories.map((c) => (
+                                <span key={c} className="bg-slate-800 text-xs px-2 py-1 rounded flex items-center gap-1">
+                                  {c}
+                                  <button
+                                    onClick={() =>
+                                      saveConfig({
+                                        ...config,
+                                        incomeCategories: incomeCategories.filter((x) => x !== c)
+                                      })
+                                    }
+                                    className="text-rose-400 font-bold"
+                                  >
+                                    ✕
+                                  </button>
+                                </span>
+                              ))}
+                            </div>
+                            <div className="flex gap-1.5">
+                              <input
+                                type="text"
+                                value={newIncomeCategoryInput}
+                                onChange={(e) => setNewIncomeCategoryInput(e.target.value)}
+                                placeholder="+ 새 수입 카테고리"
+                                className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-xs"
+                              />
+                              <button
+                                onClick={() => {
+                                  if (!newIncomeCategoryInput.trim()) return;
+                                  saveConfig({
+                                    ...config,
+                                    incomeCategories: [...incomeCategories, newIncomeCategoryInput.trim()]
+                                  });
+                                  setNewIncomeCategoryInput('');
+                                }}
+                                className="px-2.5 py-1 bg-slate-800 text-xs font-bold rounded-lg"
+                              >
+                                추가
+                              </button>
+                            </div>
+                          </div>
+
+                          <div>
                             <div className="text-xs font-bold text-amber-300 mb-1.5">결제수단 편집</div>
                             <div className="flex flex-wrap gap-1 mb-2">
                               {config.paymentMethods.map((p) => (
@@ -2558,11 +2910,10 @@
           )}
 
           {/* ========================================== */}
-          {/* 섹션 B: 근무표 전용 탭 (캘린더와 완전 분리) */}
+          {/* 섹션 B: 근무표 전용 탭 */}
           {/* ========================================== */}
           {mainSection === 'shift' && (
             <main className="max-w-7xl mx-auto px-3 sm:px-4 pt-4 grid grid-cols-1 lg:grid-cols-12 gap-5">
-              {/* 좌측 7컬럼: 근무표 보드 */}
               <section className="lg:col-span-7 flex flex-col gap-4">
                 <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2624,7 +2975,6 @@
                     </div>
                   </div>
 
-                  {/* 근무 집계 요약 */}
                   <div className="grid grid-cols-4 gap-2 pt-2 border-t border-slate-800 text-center">
                     <div className="bg-slate-950/70 rounded-xl p-2">
                       <div className="text-[11px] text-slate-400">근무일</div>
@@ -2645,7 +2995,6 @@
                   </div>
                 </div>
 
-                {/* 주간 근무표 리스트 */}
                 {shiftViewMode === 'week' && (
                   <div className="space-y-2">
                     {weekDays.map((item) => {
@@ -2704,7 +3053,6 @@
                   </div>
                 )}
 
-                {/* 월간 근무표 그리드 */}
                 {shiftViewMode === 'month' && (
                   <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-3 sm:p-4">
                     <div className="grid grid-cols-7 mb-2 text-center text-xs font-semibold text-slate-400">
@@ -2759,7 +3107,6 @@
                 )}
               </section>
 
-              {/* 우측 5컬럼: 선택일 근무 편집기 & 근무 유형 프리셋 편집 */}
               <section className="lg:col-span-5">
                 <div className="bg-slate-900/95 border border-slate-800 rounded-2xl p-4 sticky top-16 space-y-4">
                   <div className="flex items-center justify-between pb-3 border-b border-slate-800">
@@ -2777,7 +3124,6 @@
                     )}
                   </div>
 
-                  {/* 근무 유형 원터치 버튼 */}
                   <div>
                     <div className="text-xs font-bold text-slate-400 mb-2">근무 유형 선택</div>
                     <div className="flex flex-wrap gap-1.5">
@@ -2823,7 +3169,6 @@
                     </div>
                   </div>
 
-                  {/* 시간 및 연장/메모 상세 입력 */}
                   <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-3">
                     <div className="grid grid-cols-2 gap-2.5">
                       <div>
@@ -2882,7 +3227,6 @@
                     </div>
                   </div>
 
-                  {/* 새 근무 유형 추가 */}
                   <div className="pt-3 border-t border-slate-800 space-y-2">
                     <div className="text-xs font-bold text-slate-400">+ 새 근무 유형 추가</div>
                     <div className="flex gap-1.5">
