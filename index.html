@@ -83,6 +83,11 @@
         'WTYT 어깨 안정화 & 전거근 프로트랙션',
         '코호흡 Zone 2 러닝 (5\'58"~6\'15" 페이스)'
       ],
+      lifeChecks: [
+        '🧹 청소한 날',
+        '🚿 씻은 날',
+        '🧺 빨래한 날'
+      ],
       habits: [
         { id: 'h_vocal', icon: '🎤', label: '방음부스 보컬 연습 (복압/목열기/텅트릴/믹스)', defaultUnit: '분' },
         { id: 'h_jp', icon: '🇯🇵', label: '일본어 공부 (JLPT N2 문법/한자/가사)', defaultUnit: '분' },
@@ -104,13 +109,18 @@
         '월급/급여', '상여/수당', '투자/배당', '중고거래/환급', '부수입/기타'
       ],
       paymentMethods: [
-        '카드 일시불', '카드 할부(실적제외)', '체크/계좌이체'
+        '신용/체크카드', '계좌이체', '현금'
       ],
       shiftTypes: [
         { id: 'st_day', label: '주간', defaultStart: '09:00', defaultEnd: '18:00', badgeColor: 'emerald' },
         { id: 'st_ot', label: '연장/특근', defaultStart: '09:00', defaultEnd: '21:00', badgeColor: 'amber' },
         { id: 'st_night', label: '야간', defaultStart: '21:00', defaultEnd: '06:00', badgeColor: 'indigo' },
         { id: 'st_off', label: '휴무', defaultStart: '', defaultEnd: '', badgeColor: 'slate' }
+      ],
+      todoCategories: [
+        { id: 'tc_todo', icon: '✅', label: '해야할 일' },
+        { id: 'tc_idea', icon: '💡', label: '아이디어' },
+        { id: 'tc_book', icon: '📖', label: '독후감' }
       ]
     };
 
@@ -120,6 +130,7 @@
     const STORAGE_LOGS_KEY = 'LIFE_CALENDAR_DAILY_LOGS_V2';
     const STORAGE_GOALS_KEY = 'LIFE_CALENDAR_GOALS_V1';
     const STORAGE_SHIFTS_KEY = 'LIFE_CALENDAR_SHIFTS_V1';
+    const STORAGE_WORKSPACE_KEY = 'LIFE_CALENDAR_WORKSPACE_V1';
     const DB_ROOT_PATH = 'lifeCalendar';
 
     const formatDateKey = (dateObj) => {
@@ -143,14 +154,15 @@
       workoutMetrics: {},
       workoutChecks: [],
       workoutMemo: '',
+      lifeChecksDone: [],
       habitsDone: [],
-      habitDetails: {}, // { [habitId]: { value: '30', unit: '분' } }
+      habitDetails: {},
       isSick: false,
       symptoms: [],
       painLevels: {},
       conditionMemo: '',
       expenses: [],
-      incomes: [], // [{ id, category, title, amount }]
+      incomes: [],
       dailyNote: '',
       diaryTitle: '',
       diaryBody: '',
@@ -242,6 +254,7 @@
 
     function App() {
       const [syncStatus, setSyncStatus] = useState(db ? 'connecting' : 'local');
+      // 'calendar' | 'shift' | 'todo'
       const [mainSection, setMainSection] = useState('calendar');
 
       const [config, setConfig] = useState(() => {
@@ -280,6 +293,16 @@
         }
       });
 
+      // To do list / 아이디어 / 독후감 다이어리 데이터: [{ id, categoryId, title, content, done, createdAt, updatedAt }]
+      const [workspaceItems, setWorkspaceItems] = useState(() => {
+        try {
+          const saved = localStorage.getItem(STORAGE_WORKSPACE_KEY);
+          return saved ? JSON.parse(saved) : [];
+        } catch (e) {
+          return [];
+        }
+      });
+
       // Firebase 실시간 리스너
       useEffect(() => {
         if (!db) return;
@@ -288,6 +311,7 @@
         const logsRef = db.ref(`${DB_ROOT_PATH}/logs`);
         const goalsRef = db.ref(`${DB_ROOT_PATH}/goals`);
         const shiftsRef = db.ref(`${DB_ROOT_PATH}/shifts`);
+        const workspaceRef = db.ref(`${DB_ROOT_PATH}/workspace`);
 
         const onConfigValue = (snapshot) => {
           const val = snapshot.val();
@@ -335,16 +359,28 @@
           setSyncStatus('synced');
         };
 
+        const onWorkspaceValue = (snapshot) => {
+          const val = snapshot.val();
+          if (val) {
+            const arr = Array.isArray(val) ? val : Object.values(val);
+            setWorkspaceItems(arr);
+            localStorage.setItem(STORAGE_WORKSPACE_KEY, JSON.stringify(arr));
+          }
+          setSyncStatus('synced');
+        };
+
         configRef.on('value', onConfigValue, () => setSyncStatus('error'));
         logsRef.on('value', onLogsValue, () => setSyncStatus('error'));
         goalsRef.on('value', onGoalsValue, () => setSyncStatus('error'));
         shiftsRef.on('value', onShiftsValue, () => setSyncStatus('error'));
+        workspaceRef.on('value', onWorkspaceValue, () => setSyncStatus('error'));
 
         return () => {
           configRef.off('value', onConfigValue);
           logsRef.off('value', onLogsValue);
           goalsRef.off('value', onGoalsValue);
           shiftsRef.off('value', onShiftsValue);
+          workspaceRef.off('value', onWorkspaceValue);
         };
       }, []);
 
@@ -400,6 +436,18 @@
         });
       };
 
+      const saveWorkspaceItems = (nextItems) => {
+        setWorkspaceItems(nextItems);
+        localStorage.setItem(STORAGE_WORKSPACE_KEY, JSON.stringify(nextItems));
+        if (db) {
+          setSyncStatus('saving');
+          db.ref(`${DB_ROOT_PATH}/workspace`)
+            .set(nextItems)
+            .then(() => setSyncStatus('synced'))
+            .catch(() => setSyncStatus('error'));
+        }
+      };
+
       // 캘린더 및 화면 상태
       const [viewMode, setViewMode] = useState('month');
       const [currentDate, setCurrentDate] = useState(new Date());
@@ -413,6 +461,16 @@
       const [newShiftTypeLabel, setNewShiftTypeLabel] = useState('');
       const [newShiftStart, setNewShiftStart] = useState('09:00');
       const [newShiftEnd, setNewShiftEnd] = useState('18:00');
+
+      // To do / 노트 다이어리 탭 상태
+      const todoCategories = config.todoCategories || DEFAULT_CONFIG.todoCategories;
+      const [selectedTodoCat, setSelectedTodoCat] = useState(todoCategories[0]?.id || 'tc_todo');
+      const [todoTitleInput, setTodoTitleInput] = useState('');
+      const [todoContentInput, setTodoContentInput] = useState('');
+      const [editingTodoId, setEditingTodoId] = useState(null);
+      const [expandedTodoId, setExpandedTodoId] = useState(null);
+      const [newTodoCatIcon, setNewTodoCatIcon] = useState('📌');
+      const [newTodoCatLabel, setNewTodoCatLabel] = useState('');
 
       // 일기 모달 상태
       const [diaryModalDateKey, setDiaryModalDateKey] = useState(null);
@@ -438,6 +496,7 @@
       const [newMetricLabel, setNewMetricLabel] = useState('');
       const [newMetricUnit, setNewMetricUnit] = useState('회');
       const [newCheckInput, setNewCheckInput] = useState('');
+      const [newLifeCheckInput, setNewLifeCheckInput] = useState('');
       const [newHabitIcon, setNewHabitIcon] = useState('🔥');
       const [newHabitLabel, setNewHabitLabel] = useState('');
       const [newHabitUnit, setNewHabitUnit] = useState('분');
@@ -448,9 +507,9 @@
       const [newPaymentInput, setNewPaymentInput] = useState('');
 
       // 가계부(소비/수입) 입력 상태
-      const [moneyMode, setMoneyMode] = useState('expense'); // 'expense' | 'income'
+      const [moneyMode, setMoneyMode] = useState('expense');
       const [expCategory, setExpCategory] = useState(config.expenseCategories[0] || '식비/카페');
-      const [expPayment, setExpPayment] = useState(config.paymentMethods[0] || '카드 일시불');
+      const [expPayment, setExpPayment] = useState((config.paymentMethods || DEFAULT_CONFIG.paymentMethods)[0]);
       const [expTitle, setExpTitle] = useState('');
       const [expAmount, setExpAmount] = useState('');
       const [editingExpenseId, setEditingExpenseId] = useState(null);
@@ -470,6 +529,7 @@
       }, [logs, diaryModalDateKey]);
 
       const currentShift = shifts[selectedDateKey] || null;
+      const lifeChecksList = config.lifeChecks || DEFAULT_CONFIG.lifeChecks;
 
       const openDiaryForDate = (dateKey) => {
         setSelectedDateKey(dateKey);
@@ -573,6 +633,40 @@
         });
       };
 
+      // To do / 노트 저장 및 수정
+      const handleSaveWorkspaceItem = (e) => {
+        e.preventDefault();
+        if (!todoTitleInput.trim()) return;
+        const nowStr = formatDateKey(new Date());
+
+        if (editingTodoId) {
+          const next = workspaceItems.map((it) =>
+            it.id === editingTodoId
+              ? { ...it, title: todoTitleInput.trim(), content: todoContentInput, updatedAt: nowStr }
+              : it
+          );
+          saveWorkspaceItems(next);
+          setEditingTodoId(null);
+        } else {
+          const newItem = {
+            id: 'ws_' + Date.now(),
+            categoryId: selectedTodoCat,
+            title: todoTitleInput.trim(),
+            content: todoContentInput,
+            done: false,
+            createdAt: nowStr,
+            updatedAt: nowStr
+          };
+          saveWorkspaceItems([newItem, ...workspaceItems]);
+        }
+        setTodoTitleInput('');
+        setTodoContentInput('');
+      };
+
+      const filteredWorkspaceItems = useMemo(() => {
+        return workspaceItems.filter((it) => it.categoryId === selectedTodoCat);
+      }, [workspaceItems, selectedTodoCat]);
+
       // 일 / 주 / 월 목표 제어
       const activeGoalBucketKey = useMemo(() => {
         if (goalPeriod === 'daily') return selectedDateKey;
@@ -635,7 +729,7 @@
         setEditingGoalText('');
       };
 
-      // 전체 기록 검색 엔진
+      // 전체 기록 검색 엔진 (청소/씻은날 등 생활체크 포함)
       const searchResults = useMemo(() => {
         const q = searchQuery.trim().toLowerCase();
         if (!q && searchFilter === 'all') return [];
@@ -680,7 +774,7 @@
               if (textHit && (q || searchFilter === 'expense')) {
                 matches.push({
                   type: 'expense',
-                  label: `[지출/${ex.category}] ${ex.title} — -${Number(ex.amount).toLocaleString()}원 (${ex.payment})`
+                  label: `[지출/${ex.category}] ${ex.title} — -${Number(ex.amount).toLocaleString()}원`
                 });
               }
             });
@@ -715,6 +809,10 @@
           }
 
           if (searchFilter === 'all' || searchFilter === 'habit') {
+            const matchedLife = (l.lifeChecksDone || []).filter((c) => !q || c.toLowerCase().includes(q));
+            if (matchedLife.length > 0 && (q || searchFilter === 'habit')) {
+              matches.push({ type: 'habit', label: `생활 체크: ${matchedLife.join(', ')}` });
+            }
             const matchedHabits = config.habits.filter(
               (h) => l.habitsDone?.includes(h.id) && (!q || h.label.toLowerCase().includes(q))
             );
@@ -828,7 +926,7 @@
         setSelectedDateKey(formatDateKey(now));
       };
 
-      // 월간 / 주간 요약 통계 (수입 포함)
+      // 월간 / 주간 요약 통계 (할부 제거 -> 총 수입 / 총 지출)
       const summaryStats = useMemo(() => {
         const targetKeys = viewMode === 'month'
           ? calendarDays.filter((d) => d.isCurrentMonth).map((d) => d.key)
@@ -838,8 +936,6 @@
         let sickDays = 0;
         let totalIncome = 0;
         let totalExpense = 0;
-        let lumpSumExpense = 0;
-        let installmentExpense = 0;
 
         targetKeys.forEach((k) => {
           const l = logs[k];
@@ -854,19 +950,12 @@
           (l.incomes || []).forEach((inc) => {
             totalIncome += Number(inc.amount) || 0;
           });
-
           (l.expenses || []).forEach((exp) => {
-            const amt = Number(exp.amount) || 0;
-            totalExpense += amt;
-            if (exp.payment && exp.payment.includes('할부')) {
-              installmentExpense += amt;
-            } else {
-              lumpSumExpense += amt;
-            }
+            totalExpense += Number(exp.amount) || 0;
           });
         });
 
-        return { workoutDays, sickDays, totalIncome, totalExpense, lumpSumExpense, installmentExpense };
+        return { workoutDays, sickDays, totalIncome, totalExpense };
       }, [logs, viewMode, calendarDays, weekDays]);
 
       // 근무표 요약 집계
@@ -901,7 +990,7 @@
       }, [shifts, shiftViewMode, calendarDays, weekDays]);
 
       const handleExportData = () => {
-        const dataStr = JSON.stringify({ config, logs, goals, shifts }, null, 2);
+        const dataStr = JSON.stringify({ config, logs, goals, shifts, workspaceItems }, null, 2);
         const blob = new Blob([dataStr], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -932,6 +1021,9 @@
               setShifts(parsed.shifts);
               localStorage.setItem(STORAGE_SHIFTS_KEY, JSON.stringify(parsed.shifts));
               if (db) db.ref(`${DB_ROOT_PATH}/shifts`).set(parsed.shifts);
+            }
+            if (parsed.workspaceItems) {
+              saveWorkspaceItems(parsed.workspaceItems);
             }
             alert('백업 데이터를 불러오고 동기화했습니다!');
           } catch (err) {
@@ -1009,6 +1101,7 @@
 
       const korWeekNames = ['일', '월', '화', '수', '목', '금', '토'];
       const incomeCategories = config.incomeCategories || DEFAULT_CONFIG.incomeCategories;
+      const paymentMethods = config.paymentMethods || DEFAULT_CONFIG.paymentMethods;
 
       const renderSyncBadge = () => {
         if (syncStatus === 'synced') {
@@ -1052,7 +1145,7 @@
                   )}
                 </div>
 
-                {/* 메인 섹션 분리 탭 */}
+                {/* 메인 섹션 분리 탭: 캘린더 / 근무표 / To do list */}
                 <div className="inline-flex rounded-xl bg-slate-900 p-1 border border-slate-700">
                   <button
                     onClick={() => setMainSection('calendar')}
@@ -1073,6 +1166,16 @@
                     }`}
                   >
                     🗓️ 근무표
+                  </button>
+                  <button
+                    onClick={() => setMainSection('todo')}
+                    className={`px-3 py-1 text-xs sm:text-sm font-extrabold rounded-lg transition ${
+                      mainSection === 'todo'
+                        ? 'bg-amber-500 text-slate-950 shadow'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    📝 To do list
                   </button>
                 </div>
 
@@ -1352,7 +1455,7 @@
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="예: 연남, 쌀, 월급, 아팠던, 보라 완등, 주유, 일기..."
+                    placeholder="예: 연남, 쌀, 청소, 월급, 아팠던, 보라 완등, 일기..."
                     autoFocus
                     className="w-full bg-slate-900 border border-slate-700 focus:border-indigo-500 rounded-xl px-3.5 py-2.5 text-sm outline-none"
                   />
@@ -1362,7 +1465,7 @@
                       { id: 'workout', label: '💪 운동' },
                       { id: 'expense', label: '💳 소비/수입' },
                       { id: 'condition', label: '🤒 아팠던날/통증' },
-                      { id: 'habit', label: '✨ 습관' }
+                      { id: 'habit', label: '✨ 습관/생활' }
                     ].map((f) => (
                       <button
                         key={f.id}
@@ -1383,7 +1486,7 @@
                   {searchQuery.trim() === '' && searchFilter === 'all' ? (
                     <div className="text-center py-10 text-xs text-slate-400 space-y-1">
                       <div>궁금한 키워드를 입력해 보세요.</div>
-                      <div className="text-slate-500">예: "연남"으로 클라이밍 방문일 찾기, "쌀"로 구매 시점 찾기</div>
+                      <div className="text-slate-500">예: "연남"으로 클라이밍 방문일, "청소"로 마지막 청소일 찾기</div>
                     </div>
                   ) : searchResults.length === 0 ? (
                     <div className="text-center py-10 text-xs text-slate-500">일치하는 기록이 없습니다.</div>
@@ -1450,8 +1553,8 @@
                     </button>
                   </div>
 
-                  {/* 월간/주간 핵심 요약 카드 (수입 추가) */}
-                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-2 border-t border-slate-800/80 text-center">
+                  {/* 월간/주간 핵심 요약 카드 (할부 제거, 4칸 깔끔 구성) */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-slate-800/80 text-center">
                     <div className="bg-slate-950/60 rounded-xl p-2">
                       <div className="text-[11px] text-slate-400">{viewMode === 'month' ? '월 운동일' : '주간 운동일'}</div>
                       <div className="text-sm sm:text-base font-bold text-emerald-400">{summaryStats.workoutDays}일</div>
@@ -1467,15 +1570,9 @@
                       </div>
                     </div>
                     <div className="bg-slate-950/60 rounded-xl p-2">
-                      <div className="text-[11px] text-slate-400">일시불/체크</div>
-                      <div className="text-xs sm:text-sm font-bold text-sky-400">
-                        -{summaryStats.lumpSumExpense.toLocaleString()}원
-                      </div>
-                    </div>
-                    <div className="bg-slate-950/60 rounded-xl p-2 col-span-2 sm:col-span-1">
-                      <div className="text-[11px] text-slate-400">할부(실적제외)</div>
+                      <div className="text-[11px] text-slate-400">{viewMode === 'month' ? '이번달 지출' : '주간 지출'}</div>
                       <div className="text-xs sm:text-sm font-bold text-amber-400">
-                        -{summaryStats.installmentExpense.toLocaleString()}원
+                        -{summaryStats.totalExpense.toLocaleString()}원
                       </div>
                     </div>
                   </div>
@@ -1506,7 +1603,7 @@
                           ((dLog.workoutTags && dLog.workoutTags.length > 0) ||
                             (dLog.workoutChecks && dLog.workoutChecks.length > 0) ||
                             Object.values(dLog.workoutMetrics || {}).some((v) => Number(v) > 0));
-                        const habitCount = dLog?.habitsDone?.length || 0;
+                        const habitCount = (dLog?.habitsDone?.length || 0) + (dLog?.lifeChecksDone?.length || 0);
                         const isSick = dLog?.isSick;
                         const maxPain = dLog?.painLevels
                           ? Math.max(0, ...Object.values(dLog.painLevels).map(Number))
@@ -1673,11 +1770,20 @@
                             </div>
 
                             <div className="bg-slate-950/60 rounded-xl p-2.5 border border-slate-800/60">
-                              <div className="text-slate-400 font-semibold mb-1">✨ 완료한 루틴</div>
-                              {dLog.habitsDone.length === 0 ? (
+                              <div className="text-slate-400 font-semibold mb-1">✨ 루틴 & 생활</div>
+                              {dLog.habitsDone.length === 0 && (dLog.lifeChecksDone || []).length === 0 ? (
                                 <span className="text-slate-600">기록 없음</span>
                               ) : (
                                 <div className="flex flex-col gap-1">
+                                  {(dLog.lifeChecksDone || []).length > 0 && (
+                                    <div className="flex flex-wrap gap-1">
+                                      {dLog.lifeChecksDone.map((lc) => (
+                                        <span key={lc} className="bg-sky-500/20 text-sky-300 px-1.5 py-0.5 rounded">
+                                          {lc}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  )}
                                   {config.habits
                                     .filter((h) => dLog.habitsDone.includes(h.id))
                                     .map((h) => {
@@ -2173,165 +2279,234 @@
                     </div>
                   )}
 
-                  {/* 탭 2: 습관 (시간/횟수 기록 지원) */}
+                  {/* 탭 2: 습관 (생활 체크: 청소한 날/씻은 날 + 시간/횟수 기록) */}
                   {activeTab === 'habit' && (
-                    <div className="space-y-3 max-h-[65vh] overflow-y-auto pr-1">
-                      <div className="text-xs font-bold text-slate-400">
-                        일일 루틴 체크 (시간/횟수 입력 시 자동 완료 처리)
-                      </div>
-                      <div className="space-y-2">
-                        {config.habits.map((h) => {
-                          const done = currentDayLog.habitsDone.includes(h.id);
-                          const det = currentDayLog.habitDetails?.[h.id] || {
-                            value: '',
-                            unit: h.defaultUnit || '분'
-                          };
-
-                          return (
-                            <div
-                              key={h.id}
-                              onClick={() => {
-                                if (isEditConfigMode) return;
-                                updateDayLog((prev) => ({
-                                  ...prev,
-                                  habitsDone: done
-                                    ? prev.habitsDone.filter((id) => id !== h.id)
-                                    : [...prev.habitsDone, h.id]
-                                }));
-                              }}
-                              className={`flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-3 rounded-xl border transition cursor-pointer ${
-                                done
-                                  ? 'bg-violet-950/50 border-violet-500 text-violet-200'
-                                  : 'bg-slate-950 border-slate-800 text-slate-300'
-                              }`}
-                            >
-                              <div className="flex items-center gap-2.5 flex-1 min-w-0">
-                                <span className="text-lg shrink-0">{h.icon}</span>
-                                {isEditConfigMode ? (
-                                  <input
-                                    type="text"
-                                    value={h.label}
-                                    onClick={(e) => e.stopPropagation()}
-                                    onChange={(e) => {
-                                      const updated = config.habits.map((item) =>
-                                        item.id === h.id ? { ...item, label: e.target.value } : item
-                                      );
-                                      saveConfig({ ...config, habits: updated });
-                                    }}
-                                    className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs w-full"
-                                  />
-                                ) : (
-                                  <span className="text-xs sm:text-sm font-semibold truncate">{h.label}</span>
-                                )}
-                              </div>
-
-                              <div
-                                className="flex items-center gap-1.5 shrink-0 justify-end"
-                                onClick={(e) => e.stopPropagation()}
-                              >
-                                <input
-                                  type="number"
-                                  min="0"
-                                  step="0.5"
-                                  value={det.value}
-                                  onChange={(e) =>
-                                    handleUpdateHabitDetail(h.id, h.defaultUnit, 'value', e.target.value)
+                    <div className="space-y-4 max-h-[65vh] overflow-y-auto pr-1">
+                      {/* 생활 체크 (청소한 날 / 씻은 날 등) */}
+                      <div>
+                        <div className="text-xs font-bold text-sky-400 mb-2">생활 체크 (청소 / 위생 / 집안일)</div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {lifeChecksList.map((lc) => {
+                            const active = (currentDayLog.lifeChecksDone || []).includes(lc);
+                            return (
+                              <div key={lc} className="inline-flex items-center">
+                                <button
+                                  onClick={() =>
+                                    updateDayLog((prev) => ({
+                                      ...prev,
+                                      lifeChecksDone: active
+                                        ? (prev.lifeChecksDone || []).filter((x) => x !== lc)
+                                        : [...(prev.lifeChecksDone || []), lc]
+                                    }))
                                   }
-                                  placeholder="0"
-                                  className="w-14 bg-slate-900 border border-slate-700 focus:border-violet-400 rounded-lg px-2 py-1 text-xs text-center font-bold text-white outline-none"
-                                />
-                                <select
-                                  value={det.unit || h.defaultUnit || '분'}
-                                  onChange={(e) =>
-                                    handleUpdateHabitDetail(h.id, h.defaultUnit, 'unit', e.target.value)
-                                  }
-                                  className="bg-slate-900 border border-slate-700 rounded-lg px-1.5 py-1 text-[11px] text-slate-200 outline-none"
+                                  className={`px-3 py-1.5 text-xs font-bold rounded-xl border transition ${
+                                    active
+                                      ? 'bg-sky-600 border-sky-400 text-white shadow'
+                                      : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'
+                                  }`}
                                 >
-                                  {HABIT_UNITS.map((u) => (
-                                    <option key={u} value={u}>{u}</option>
-                                  ))}
-                                </select>
-
-                                {isEditConfigMode ? (
+                                  {lc}
+                                </button>
+                                {isEditConfigMode && (
                                   <button
                                     onClick={() =>
                                       saveConfig({
                                         ...config,
-                                        habits: config.habits.filter((item) => item.id !== h.id)
+                                        lifeChecks: lifeChecksList.filter((x) => x !== lc)
                                       })
                                     }
-                                    className="text-rose-400 text-xs font-bold px-1.5"
+                                    className="ml-1 text-rose-400 text-xs font-bold px-1"
                                   >
                                     ✕
                                   </button>
-                                ) : (
-                                  <button
-                                    onClick={() =>
-                                      updateDayLog((prev) => ({
-                                        ...prev,
-                                        habitsDone: done
-                                          ? prev.habitsDone.filter((id) => id !== h.id)
-                                          : [...prev.habitsDone, h.id]
-                                      }))
-                                    }
-                                    className={`text-[11px] font-bold px-2 py-1 rounded-lg min-w-[52px] ${
-                                      done ? 'bg-violet-600 text-white' : 'bg-slate-800 text-slate-400'
-                                    }`}
-                                  >
-                                    {done ? '완료 ✓' : '미완료'}
-                                  </button>
                                 )}
                               </div>
-                            </div>
-                          );
-                        })}
+                            );
+                          })}
+                        </div>
+                        <div className="flex gap-1.5 mt-2">
+                          <input
+                            type="text"
+                            value={newLifeCheckInput}
+                            onChange={(e) => setNewLifeCheckInput(e.target.value)}
+                            placeholder="+ 새 생활 체크 (예: 🗑️ 분리수거, 💊 영양제)"
+                            className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs outline-none focus:border-sky-500"
+                          />
+                          <button
+                            onClick={() => {
+                              if (!newLifeCheckInput.trim()) return;
+                              saveConfig({
+                                ...config,
+                                lifeChecks: [...lifeChecksList, newLifeCheckInput.trim()]
+                              });
+                              setNewLifeCheckInput('');
+                            }}
+                            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs font-bold rounded-lg"
+                          >
+                            추가
+                          </button>
+                        </div>
                       </div>
 
-                      <div className="flex gap-1.5 pt-2">
-                        <input
-                          type="text"
-                          value={newHabitIcon}
-                          onChange={(e) => setNewHabitIcon(e.target.value)}
-                          className="w-11 text-center bg-slate-950 border border-slate-800 rounded-lg py-1.5 text-sm"
-                          placeholder="🔥"
-                        />
-                        <input
-                          type="text"
-                          value={newHabitLabel}
-                          onChange={(e) => setNewHabitLabel(e.target.value)}
-                          placeholder="+ 새로운 습관/루틴 이름"
-                          className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs outline-none"
-                        />
-                        <select
-                          value={newHabitUnit}
-                          onChange={(e) => setNewHabitUnit(e.target.value)}
-                          className="bg-slate-950 border border-slate-800 rounded-lg px-1.5 py-1.5 text-xs outline-none"
-                        >
-                          {HABIT_UNITS.map((u) => (
-                            <option key={u} value={u}>{u}</option>
-                          ))}
-                        </select>
-                        <button
-                          onClick={() => {
-                            if (!newHabitLabel.trim()) return;
-                            saveConfig({
-                              ...config,
-                              habits: [
-                                ...config.habits,
-                                {
-                                  id: 'h_' + Date.now(),
-                                  icon: newHabitIcon || '✨',
-                                  label: newHabitLabel.trim(),
-                                  defaultUnit: newHabitUnit
-                                }
-                              ]
-                            });
-                            setNewHabitLabel('');
-                          }}
-                          className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs font-bold rounded-lg"
-                        >
-                          추가
-                        </button>
+                      {/* 일일 루틴 (시간/횟수 기록) */}
+                      <div className="pt-3 border-t border-slate-800 space-y-2.5">
+                        <div className="text-xs font-bold text-slate-400">
+                          일일 루틴 체크 (시간/횟수 입력 시 자동 완료 처리)
+                        </div>
+                        <div className="space-y-2">
+                          {config.habits.map((h) => {
+                            const done = currentDayLog.habitsDone.includes(h.id);
+                            const det = currentDayLog.habitDetails?.[h.id] || {
+                              value: '',
+                              unit: h.defaultUnit || '분'
+                            };
+
+                            return (
+                              <div
+                                key={h.id}
+                                onClick={() => {
+                                  if (isEditConfigMode) return;
+                                  updateDayLog((prev) => ({
+                                    ...prev,
+                                    habitsDone: done
+                                      ? prev.habitsDone.filter((id) => id !== h.id)
+                                      : [...prev.habitsDone, h.id]
+                                  }));
+                                }}
+                                className={`flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-3 rounded-xl border transition cursor-pointer ${
+                                  done
+                                    ? 'bg-violet-950/50 border-violet-500 text-violet-200'
+                                    : 'bg-slate-950 border-slate-800 text-slate-300'
+                                }`}
+                              >
+                                <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                                  <span className="text-lg shrink-0">{h.icon}</span>
+                                  {isEditConfigMode ? (
+                                    <input
+                                      type="text"
+                                      value={h.label}
+                                      onClick={(e) => e.stopPropagation()}
+                                      onChange={(e) => {
+                                        const updated = config.habits.map((item) =>
+                                          item.id === h.id ? { ...item, label: e.target.value } : item
+                                        );
+                                        saveConfig({ ...config, habits: updated });
+                                      }}
+                                      className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs w-full"
+                                    />
+                                  ) : (
+                                    <span className="text-xs sm:text-sm font-semibold truncate">{h.label}</span>
+                                  )}
+                                </div>
+
+                                <div
+                                  className="flex items-center gap-1.5 shrink-0 justify-end"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    step="0.5"
+                                    value={det.value}
+                                    onChange={(e) =>
+                                      handleUpdateHabitDetail(h.id, h.defaultUnit, 'value', e.target.value)
+                                    }
+                                    placeholder="0"
+                                    className="w-14 bg-slate-900 border border-slate-700 focus:border-violet-400 rounded-lg px-2 py-1 text-xs text-center font-bold text-white outline-none"
+                                  />
+                                  <select
+                                    value={det.unit || h.defaultUnit || '분'}
+                                    onChange={(e) =>
+                                      handleUpdateHabitDetail(h.id, h.defaultUnit, 'unit', e.target.value)
+                                    }
+                                    className="bg-slate-900 border border-slate-700 rounded-lg px-1.5 py-1 text-[11px] text-slate-200 outline-none"
+                                  >
+                                    {HABIT_UNITS.map((u) => (
+                                      <option key={u} value={u}>{u}</option>
+                                    ))}
+                                  </select>
+
+                                  {isEditConfigMode ? (
+                                    <button
+                                      onClick={() =>
+                                        saveConfig({
+                                          ...config,
+                                          habits: config.habits.filter((item) => item.id !== h.id)
+                                        })
+                                      }
+                                      className="text-rose-400 text-xs font-bold px-1.5"
+                                    >
+                                      ✕
+                                    </button>
+                                  ) : (
+                                    <button
+                                      onClick={() =>
+                                        updateDayLog((prev) => ({
+                                          ...prev,
+                                          habitsDone: done
+                                            ? prev.habitsDone.filter((id) => id !== h.id)
+                                            : [...prev.habitsDone, h.id]
+                                        }))
+                                      }
+                                      className={`text-[11px] font-bold px-2 py-1 rounded-lg min-w-[52px] ${
+                                        done ? 'bg-violet-600 text-white' : 'bg-slate-800 text-slate-400'
+                                      }`}
+                                    >
+                                      {done ? '완료 ✓' : '미완료'}
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        <div className="flex gap-1.5 pt-2">
+                          <input
+                            type="text"
+                            value={newHabitIcon}
+                            onChange={(e) => setNewHabitIcon(e.target.value)}
+                            className="w-11 text-center bg-slate-950 border border-slate-800 rounded-lg py-1.5 text-sm"
+                            placeholder="🔥"
+                          />
+                          <input
+                            type="text"
+                            value={newHabitLabel}
+                            onChange={(e) => setNewHabitLabel(e.target.value)}
+                            placeholder="+ 새로운 습관/루틴 이름"
+                            className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs outline-none"
+                          />
+                          <select
+                            value={newHabitUnit}
+                            onChange={(e) => setNewHabitUnit(e.target.value)}
+                            className="bg-slate-950 border border-slate-800 rounded-lg px-1.5 py-1.5 text-xs outline-none"
+                          >
+                            {HABIT_UNITS.map((u) => (
+                              <option key={u} value={u}>{u}</option>
+                            ))}
+                          </select>
+                          <button
+                            onClick={() => {
+                              if (!newHabitLabel.trim()) return;
+                              saveConfig({
+                                ...config,
+                                habits: [
+                                  ...config.habits,
+                                  {
+                                    id: 'h_' + Date.now(),
+                                    icon: newHabitIcon || '✨',
+                                    label: newHabitLabel.trim(),
+                                    defaultUnit: newHabitUnit
+                                  }
+                                ]
+                              });
+                              setNewHabitLabel('');
+                            }}
+                            className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs font-bold rounded-lg"
+                          >
+                            추가
+                          </button>
+                        </div>
                       </div>
                     </div>
                   )}
@@ -2500,7 +2675,6 @@
                   {/* 탭 4: 소비 / 수입 */}
                   {activeTab === 'expense' && (
                     <div className="space-y-4 max-h-[65vh] overflow-y-auto pr-1">
-                      {/* 지출 / 수입 전환 스위치 */}
                       <div className="grid grid-cols-2 gap-1.5 bg-slate-950 p-1 rounded-xl border border-slate-800">
                         <button
                           onClick={() => setMoneyMode('expense')}
@@ -2545,7 +2719,7 @@
                               onChange={(e) => setExpPayment(e.target.value)}
                               className="bg-slate-900 border border-slate-800 rounded-lg px-2 py-1.5 text-xs outline-none"
                             >
-                              {config.paymentMethods.map((p) => (
+                              {paymentMethods.map((p) => (
                                 <option key={p} value={p}>{p}</option>
                               ))}
                             </select>
@@ -2645,7 +2819,7 @@
                         </form>
                       )}
 
-                      {/* 당일 수입 내역 목록 */}
+                      {/* 당일 수입 내역 */}
                       {(currentDayLog.incomes || []).length > 0 && (
                         <div className="space-y-1.5">
                           <div className="text-[11px] font-bold text-teal-400">💰 당일 수입</div>
@@ -2693,7 +2867,7 @@
                         </div>
                       )}
 
-                      {/* 당일 지출 내역 목록 */}
+                      {/* 당일 지출 내역 */}
                       <div className="space-y-1.5">
                         <div className="text-[11px] font-bold text-amber-400">💸 당일 지출</div>
                         {(currentDayLog.expenses || []).length === 0 ? (
@@ -2709,15 +2883,11 @@
                                   <span className="bg-slate-800 text-slate-300 px-1.5 py-0.5 rounded text-[10px]">
                                     {item.category}
                                   </span>
-                                  <span
-                                    className={`px-1.5 py-0.5 rounded text-[10px] ${
-                                      item.payment?.includes('할부')
-                                        ? 'bg-amber-500/20 text-amber-300'
-                                        : 'bg-sky-500/20 text-sky-300'
-                                    }`}
-                                  >
-                                    {item.payment}
-                                  </span>
+                                  {item.payment && (
+                                    <span className="bg-sky-500/20 text-sky-300 px-1.5 py-0.5 rounded text-[10px]">
+                                      {item.payment}
+                                    </span>
+                                  )}
                                 </div>
                                 <div className="font-bold text-slate-200 mt-1">{item.title}</div>
                               </div>
@@ -2848,14 +3018,14 @@
                           <div>
                             <div className="text-xs font-bold text-amber-300 mb-1.5">결제수단 편집</div>
                             <div className="flex flex-wrap gap-1 mb-2">
-                              {config.paymentMethods.map((p) => (
+                              {paymentMethods.map((p) => (
                                 <span key={p} className="bg-slate-800 text-xs px-2 py-1 rounded flex items-center gap-1">
                                   {p}
                                   <button
                                     onClick={() =>
                                       saveConfig({
                                         ...config,
-                                        paymentMethods: config.paymentMethods.filter((x) => x !== p)
+                                        paymentMethods: paymentMethods.filter((x) => x !== p)
                                       })
                                     }
                                     className="text-rose-400 font-bold"
@@ -2878,7 +3048,7 @@
                                   if (!newPaymentInput.trim()) return;
                                   saveConfig({
                                     ...config,
-                                    paymentMethods: [...config.paymentMethods, newPaymentInput.trim()]
+                                    paymentMethods: [...paymentMethods, newPaymentInput.trim()]
                                   });
                                   setNewPaymentInput('');
                                 }}
@@ -3272,6 +3442,258 @@
                       근무 유형 저장
                     </button>
                   </div>
+                </div>
+              </section>
+            </main>
+          )}
+
+          {/* ========================================== */}
+          {/* 섹션 C: To do list / 아이디어 / 독후감 다이어리 탭 */}
+          {/* ========================================== */}
+          {mainSection === 'todo' && (
+            <main className="max-w-7xl mx-auto px-3 sm:px-4 pt-4 grid grid-cols-1 lg:grid-cols-12 gap-5">
+              {/* 좌측 4컬럼: 카테고리 폴더 목록 & 자유 편집 */}
+              <section className="lg:col-span-4 space-y-4">
+                <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-base font-extrabold">📂 다이어리 카테고리</h2>
+                    <span className="text-[11px] text-slate-400">자유 추가·편집</span>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    {todoCategories.map((cat) => {
+                      const active = selectedTodoCat === cat.id;
+                      const count = workspaceItems.filter((it) => it.categoryId === cat.id).length;
+                      return (
+                        <div
+                          key={cat.id}
+                          onClick={() => {
+                            if (isEditConfigMode) return;
+                            setSelectedTodoCat(cat.id);
+                            setEditingTodoId(null);
+                            setTodoTitleInput('');
+                            setTodoContentInput('');
+                          }}
+                          className={`flex items-center justify-between gap-2 p-3 rounded-xl border transition cursor-pointer ${
+                            active
+                              ? 'bg-amber-500/15 border-amber-500 text-amber-200'
+                              : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                            <span className="text-lg shrink-0">{cat.icon}</span>
+                            {isEditConfigMode ? (
+                              <input
+                                type="text"
+                                value={cat.label}
+                                onClick={(e) => e.stopPropagation()}
+                                onChange={(e) => {
+                                  const updated = todoCategories.map((c) =>
+                                    c.id === cat.id ? { ...c, label: e.target.value } : c
+                                  );
+                                  saveConfig({ ...config, todoCategories: updated });
+                                }}
+                                className="bg-slate-900 border border-slate-700 rounded px-2 py-0.5 text-xs w-full text-white"
+                              />
+                            ) : (
+                              <span className="text-sm font-bold truncate">{cat.label}</span>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span className="text-xs bg-slate-800 text-slate-300 px-2 py-0.5 rounded-full font-bold">
+                              {count}
+                            </span>
+                            {isEditConfigMode && todoCategories.length > 1 && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const nextCats = todoCategories.filter((c) => c.id !== cat.id);
+                                  saveConfig({ ...config, todoCategories: nextCats });
+                                  if (selectedTodoCat === cat.id && nextCats[0]) {
+                                    setSelectedTodoCat(nextCats[0].id);
+                                  }
+                                }}
+                                className="text-rose-400 text-xs font-bold px-1"
+                              >
+                                ✕
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* 새 카테고리 추가 */}
+                  <div className="pt-3 border-t border-slate-800 flex gap-1.5">
+                    <input
+                      type="text"
+                      value={newTodoCatIcon}
+                      onChange={(e) => setNewTodoCatIcon(e.target.value)}
+                      className="w-11 text-center bg-slate-950 border border-slate-800 rounded-lg py-1.5 text-sm"
+                      placeholder="📌"
+                    />
+                    <input
+                      type="text"
+                      value={newTodoCatLabel}
+                      onChange={(e) => setNewTodoCatLabel(e.target.value)}
+                      placeholder="+ 새 카테고리 (예: 유튜브 기획)"
+                      className="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs outline-none"
+                    />
+                    <button
+                      onClick={() => {
+                        if (!newTodoCatLabel.trim()) return;
+                        const newCat = {
+                          id: 'tc_' + Date.now(),
+                          icon: newTodoCatIcon || '📌',
+                          label: newTodoCatLabel.trim()
+                        };
+                        saveConfig({ ...config, todoCategories: [...todoCategories, newCat] });
+                        setSelectedTodoCat(newCat.id);
+                        setNewTodoCatLabel('');
+                      }}
+                      className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-xs font-bold rounded-lg"
+                    >
+                      추가
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              {/* 우측 8컬럼: 글 작성기 & 목록 */}
+              <section className="lg:col-span-8 space-y-4">
+                {/* 작성 / 수정 폼 */}
+                <form
+                  onSubmit={handleSaveWorkspaceItem}
+                  className="bg-slate-900/95 border border-slate-800 rounded-2xl p-4 space-y-3"
+                >
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-base font-extrabold text-amber-300">
+                      {todoCategories.find((c) => c.id === selectedTodoCat)?.icon}{' '}
+                      {todoCategories.find((c) => c.id === selectedTodoCat)?.label}{' '}
+                      {editingTodoId ? '수정' : '새로 적기'}
+                    </h3>
+                    {editingTodoId && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingTodoId(null);
+                          setTodoTitleInput('');
+                          setTodoContentInput('');
+                        }}
+                        className="text-xs text-slate-400 hover:text-white"
+                      >
+                        수정 취소
+                      </button>
+                    )}
+                  </div>
+
+                  <input
+                    type="text"
+                    value={todoTitleInput}
+                    onChange={(e) => setTodoTitleInput(e.target.value)}
+                    placeholder="제목 또는 해야 할 일을 입력하세요..."
+                    className="w-full bg-slate-950 border border-slate-800 focus:border-amber-500 rounded-xl px-3.5 py-2.5 text-sm font-bold outline-none"
+                  />
+                  <textarea
+                    rows="3"
+                    value={todoContentInput}
+                    onChange={(e) => setTodoContentInput(e.target.value)}
+                    placeholder="상세 내용, 아이디어 메모, 독후감 등을 자유롭게 적어보세요 (선택)"
+                    className="w-full bg-slate-950 border border-slate-800 focus:border-amber-500 rounded-xl p-3 text-xs sm:text-sm leading-relaxed outline-none resize-y"
+                  />
+                  <div className="flex justify-end">
+                    <button
+                      type="submit"
+                      className="px-5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-xs sm:text-sm rounded-xl transition"
+                    >
+                      {editingTodoId ? '수정 저장' : '+ 기록 추가'}
+                    </button>
+                  </div>
+                </form>
+
+                {/* 등록된 항목 리스트 */}
+                <div className="space-y-2.5">
+                  {filteredWorkspaceItems.length === 0 ? (
+                    <div className="text-center py-12 text-xs text-slate-500 bg-slate-900/60 border border-slate-800 rounded-2xl">
+                      아직 작성된 항목이 없습니다. 위에서 첫 기록을 남겨보세요!
+                    </div>
+                  ) : (
+                    filteredWorkspaceItems.map((item) => {
+                      const isExpanded = expandedTodoId === item.id;
+                      return (
+                        <div
+                          key={item.id}
+                          className={`p-4 rounded-2xl border transition ${
+                            item.done
+                              ? 'bg-emerald-950/20 border-emerald-500/30'
+                              : 'bg-slate-900/90 border-slate-800 hover:border-slate-700'
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="flex items-start gap-2.5 flex-1 min-w-0">
+                              <input
+                                type="checkbox"
+                                checked={!!item.done}
+                                onChange={() => {
+                                  const next = workspaceItems.map((it) =>
+                                    it.id === item.id ? { ...it, done: !it.done } : it
+                                  );
+                                  saveWorkspaceItems(next);
+                                }}
+                                className="mt-1 w-4 h-4 accent-emerald-500 rounded cursor-pointer shrink-0"
+                              />
+                              <div
+                                onClick={() => setExpandedTodoId(isExpanded ? null : item.id)}
+                                className="flex-1 min-w-0 cursor-pointer"
+                              >
+                                <div
+                                  className={`text-sm sm:text-base font-bold ${
+                                    item.done ? 'line-through text-slate-500' : 'text-slate-100'
+                                  }`}
+                                >
+                                  {item.title}
+                                </div>
+                                <div className="text-[11px] text-slate-500 mt-0.5">{item.createdAt}</div>
+                                {item.content && (
+                                  <div
+                                    className={`mt-2 text-xs sm:text-sm text-slate-300 whitespace-pre-wrap leading-relaxed ${
+                                      isExpanded ? '' : 'line-clamp-2'
+                                    }`}
+                                  >
+                                    {item.content}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-1.5 text-xs shrink-0">
+                              <button
+                                onClick={() => {
+                                  setEditingTodoId(item.id);
+                                  setTodoTitleInput(item.title);
+                                  setTodoContentInput(item.content || '');
+                                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                                }}
+                                className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-indigo-600 text-slate-300 hover:text-white transition"
+                              >
+                                수정
+                              </button>
+                              <button
+                                onClick={() => {
+                                  saveWorkspaceItems(workspaceItems.filter((it) => it.id !== item.id));
+                                }}
+                                className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-rose-600 text-rose-300 hover:text-white transition"
+                              >
+                                삭제
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
                 </div>
               </section>
             </main>
